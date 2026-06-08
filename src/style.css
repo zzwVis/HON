@@ -1,0 +1,100 @@
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: rgba(255, 255, 255, 255);
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #1a1a1a;
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: #646cff;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+.card {
+  padding: 2em;
+}
+
+#app {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+/*下拉框样式*/
+.my-select {
+  margin-left: 1%;
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 70%;
+  color: #606266;
+  background-color: #fff;
+  cursor: pointer;
+  outline: none;
+  width: 6vw;
+  height: 3vh;
+}
+
+/*悬浮框样式*/
+.tooltip {
+  position: absolute;
+  padding: 12px;
+  background-color: #f8f9fa;
+  border:1px solid #ced4da;
+  border-radius:8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  color: #495057;
+  line-height: 1.4;
+  font-size: 14px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/*.mouseover-circle {*/
+/*  filter: drop-shadow(0 0 4px grey);*/
+/*  stroke:black;*/
+/*}*/
+
+.my-button {
+  margin-left: 1%;
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 70%;
+  color: #606266;
+  background-color: #fff;
+  cursor: pointer;
+  outline: none;
+  width: 6vw;
+  height: 3vh;
+}
+
+.my-button:hover {
+  /*background-color: #0056b3;*/
+}
