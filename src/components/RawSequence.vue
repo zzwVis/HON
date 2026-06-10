@@ -853,6 +853,9 @@ function renderFa2Graph(data) {
       .on("click", (event, d) => {
         event.stopPropagation()
         const rid = regionStore.activeRegionId
+        const sourceRid = rid || "global"
+        if (!brushStore.canEditActiveBrushFromRegion(sourceRid)) return
+
         if (rid) {
           brushStore.setActivePanelRegion(rid, "region")
         } else {
@@ -1096,8 +1099,10 @@ function renderSequenceGraph(data) {
 .tooltip {
   position: absolute;
   pointer-events: none;
-  background: rgba(0, 0, 0, 0.75);
-  color: #fff;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--text-main);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow-soft);
   padding: 6px 8px;
   border-radius: 4px;
   font-size: 12px;
@@ -1110,27 +1115,31 @@ function renderSequenceGraph(data) {
 .seq-toolbar {
   position: sticky;
   top: 0;
-  padding: 6px 6px;
+  padding: 6px 8px;
   z-index: 10;
+  background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
+  border-bottom: 1px solid var(--panel-border);
 }
 
 .seq-toolbar .view-select {
-  padding: 4px 10px;
-  border-radius: 4px;
-  background: #f6f6f6;
-  color: #606266;
+  padding: 4px 28px 4px 9px;
+  border-radius: 5px;
+  background: #fff;
+  color: var(--text-main);
   cursor: pointer;
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--panel-border);
+  font-size: 12px;
 }
 
 .seq-toolbar .view-select:hover {
-  background: #eaeaea;
+  background: var(--accent-soft);
+  border-color: rgba(47, 111, 159, 0.45);
 }
 
 .seq-toolbar .view-select:focus,
 .seq-toolbar .view-select:active {
-  outline: none;
-  background: #f6f6f6;
+  outline: 2px solid rgba(47, 111, 159, 0.18);
+  background: #fff;
 }
 
 </style>

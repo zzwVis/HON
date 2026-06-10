@@ -7,6 +7,7 @@ import { usePayloadStore } from "@/store/payloadStore.js"
 import { useBrushStore } from "@/store/brushStore.js"
 import { drawGlyphForce } from "./drawGlyphForce.js"
 import { useRegionStore } from "@/store/regionStore.js"
+import { apiUrl } from "@/api"
 import Graph from "graphology"
 import forceAtlas2 from "graphology-layout-forceatlas2"
 // ⭐ 新增：导入图片
@@ -124,7 +125,7 @@ async function upload() {
   form.append("K", 3)
 
   const res = await fetch(
-      "http://localhost:8000/api/rewrite",
+      apiUrl("/api/rewrite"),
       {
         method: "POST",
         body: form
@@ -240,7 +241,7 @@ async function handleDialogConfirm() {
   )
 
   const res = await fetch(
-      "http://localhost:8000/api/refine_cluster",
+      apiUrl("/api/refine_cluster"),
       {
         method: "POST",
         body: form
@@ -481,6 +482,8 @@ function renderGraph(data) {
       .on("click", (event, d) => {
         event.stopPropagation()
         // 说明我现在在对全量图进行brush
+        if (!brushStore.canEditActiveBrushFromRegion("global")) return
+
         brushStore.setActivePanelRegion(
             "global",
             "global"
@@ -556,6 +559,7 @@ function renderGraph(data) {
       .on("click", (event, d) => {
 
         event.stopPropagation()
+        if (!brushStore.canEditActiveBrushFromRegion("global")) return
 
         brushStore.setActivePanelRegion(
             "global",
@@ -1261,6 +1265,7 @@ function renderGraph(data) {
       <div class="control">
         <input ref="fileInput" type="file" accept=".csv" class="hidden-file-input" @change="onFileChange" />
         <el-icon :size="10" @click="triggerUpload" class="upload-btn"><Upload /></el-icon>
+        <span class="global-title">Global</span>
       </div>
       <div ref="legendRef" class="legend"></div>
 
@@ -1286,9 +1291,9 @@ function renderGraph(data) {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
   padding: 0px;
-  background: white;
+  background: var(--panel-bg);
   box-sizing: border-box;
 }
 
@@ -1314,12 +1319,14 @@ function renderGraph(data) {
 }
 
 .legend {
-  font-size: 12px;
+  font-size: 11px;
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  padding: 10px;
-  gap: 10px 14px;
+  padding: 7px 9px;
+  gap: 8px 12px;
+  min-height: 32px;
+  color: var(--text-muted);
 }
 
 .legend-item {
@@ -1339,9 +1346,9 @@ function renderGraph(data) {
 }
 
 .swatch {
-  width: 14px;
-  height: 14px;
-  border: 1px solid #999;
+  width: 12px;
+  height: 12px;
+  border: 1px solid rgba(36, 49, 66, 0.32);
   box-sizing: border-box;
   display: inline-block;
   vertical-align: middle;
@@ -1358,8 +1365,10 @@ function renderGraph(data) {
 .tooltip {
   position: absolute;
   pointer-events: none;
-  background: rgba(0, 0, 0, 0.75);
-  color: #fff;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--text-main);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow-soft);
   padding: 6px 8px;
   border-radius: 4px;
   font-size: 12px;
@@ -1372,37 +1381,55 @@ function renderGraph(data) {
 }
 
 .svg-section svg {
-  width: 99.8%;
-  height: 99.8%;
+  width: 100%;
+  height: 100%;
   display: block;
-  border: 1px solid #c0c0c0; /* 银灰色边框 */
-  border-radius: 4px;
+  border: none;
+  border-top: 1px solid var(--panel-border);
+  border-radius: 0;
   background-color: #ffffff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
 }
 
 /* 文件输入样式 */
 .control input[type="file"] {
   padding: 6px 12px;
-  border: 1px solid #c0c0c0;
+  border: 1px solid var(--panel-border);
   border-radius: 4px;
-  background-color: #f8f8f8;
-  font-size: 14px;
+  background-color: var(--panel-soft);
+  font-size: 12px;
   cursor: pointer;
 }
 
 .control input[type="file"]:hover {
-  border-color: #a0a0a0;
-  background-color: #f0f0f0;
+  border-color: var(--accent);
+  background-color: var(--accent-soft);
 }
 
 .legend-row {
   display: flex;
-  align-items: center; /* 垂直居中 */
-  gap: 20px;           /* 按钮和 legend 之间的间距 */
+  align-items: stretch;
+  gap: 12px;
   width: 100%;
-  flex-wrap: nowrap;   /* 强制不换行 */
-  background: #f5f5f5;
+  flex-wrap: nowrap;
+  background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.control {
+  width: 44px;
+  flex: 0 0 44px;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 2px;
+  padding: 3px 0 2px;
+}
+
+.global-title {
+  color: var(--text-main);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 /* 文件上传样式 */
@@ -1417,21 +1444,22 @@ function renderGraph(data) {
   width: 20px;
   height: 20px;
   padding: 0;
-  margin-left: 5px;
-  margin-top: 5px;
+  margin-left: 0;
+  margin-top: 0;
   border-radius: 6px;
   cursor: pointer;
-  background: #f8f8f8;
-  color: #606266;
-  border: 1px solid #d5d9e0;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  background: #fff;
+  color: var(--text-muted);
+  border: 1px solid var(--panel-border);
   transition: all 0.2s ease;
 }
 
-
-.upload-btn:hover{
-  background: #eaeaea;
+.upload-btn:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(47, 111, 159, 0.45);
 }
+
 
 .upload-btn:active {
   transform: scale(0.97);

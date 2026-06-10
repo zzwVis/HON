@@ -123,6 +123,7 @@ export const useRegionStore = defineStore("region", {
 
             // this.activeRegionId = r
             // this.activeRegionId = null
+            return r
         },
 
         setActive(regionId) {
@@ -261,6 +262,25 @@ export const useRegionStore = defineStore("region", {
                     sequences: []   // ⭐ 清空旧结果
                 }
             }
+        },
+
+        replaceBrush(oldBrushId, newBrushId) {
+            let changed = false
+            const newRegions = {}
+
+            for (const [id, r] of Object.entries(this.regions)) {
+                if (r.brushId === oldBrushId) {
+                    newRegions[id] = {
+                        ...r,
+                        brushId: newBrushId
+                    }
+                    changed = true
+                } else {
+                    newRegions[id] = r
+                }
+            }
+
+            if (changed) this.regions = newRegions
         },
 
         remove(regionId) {

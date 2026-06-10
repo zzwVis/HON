@@ -30,6 +30,22 @@ const brush = computed(() => {
   return brushStore.brushes[r.brushId] || null
 })
 
+const regionTitle = computed(() => {
+  const r = region.value
+  if (!r) return "Region"
+  return r.id === "root" ? "Region root" : `Region ${r.id}`
+})
+
+const regionSubtitle = computed(() => {
+  const r = region.value
+  const parts = []
+  if (brush.value?.name) parts.push(brush.value.name)
+  if (r?.sourceRegionId) {
+    parts.push(`from ${r.sourceRegionId === "global" ? "Global" : `Region ${r.sourceRegionId}`}`)
+  }
+  return parts.join(" · ")
+})
+
 // Apply 前也提前写入 source 信息，避免 ForceGraph baseline 依赖全局 preview 时序
 watchEffect(() => {
   const r = region.value
@@ -480,18 +496,11 @@ watchEffect(() => {
       :style="{ borderColor: brush ? brush.color : '#ccc' }"
   >
     <div class="panel-header" @click="regionStore.setActive(region.id)">
-      <button
-          class="apply"
-          :disabled="!(brushStore.activeBrushId &&
-             brushStore.preview?.brushId === brushStore.activeBrushId &&
-             brushStore.preview?.count > 0)"
-          @click.stop="apply"
-      >
-        <img src="../assets/show.png" alt="show" style="width: 16px; height: 16px;">
-      </button>
-
       <span v-if="brush" class="dot" :style="{ background: brush.color }" />
-      <span class="small-title">{{ brush ? brush.name : "" }}</span>
+      <span class="title-stack">
+        <span class="small-title">{{ regionTitle }}</span>
+        <span v-if="regionSubtitle" class="subtitle">{{ regionSubtitle }}</span>
+      </span>
 
       <div class="panel-controls" v-if="region.sliceMode && region.prevMax > 0" @click.stop>
         <div class="ctrl">
@@ -541,9 +550,6 @@ watchEffect(() => {
           <span>Slice</span>
         </label>
 
-        <button class="fork" title="Fork new region" @click.stop="regionStore.fork()">
-          <img src="../assets/add.png" alt="fork" style="width: 16px; height: 16px;">
-        </button>
         <button class="close" title="Remove region" @click.stop="regionStore.remove(region.id)">
           <img src="../assets/delete.png" alt="delete" style="width: 16px; height: 16px;">
         </button>
@@ -565,21 +571,26 @@ watchEffect(() => {
 
 /* panel */
 .panel {
-  border: 2px solid #ccc;
+  border: 1px solid var(--panel-border);
   border-radius: 6px;
   display: flex;
   flex-direction: column;
   min-height: 320px;
-  background: white;
+  background: var(--panel-bg);
+  overflow: hidden;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
 .panel-header {
-  padding: 2px 8px;
+  min-height: 31px;
+  padding: 4px 8px;
   display: flex;
   align-items: center;
   gap: 6px;
   font-weight: 600;
-  background: #f5f5f5;
+  background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
+  border-bottom: 1px solid var(--panel-border);
+  color: var(--text-main);
 }
 
 /* 新增：按钮组容器 */
@@ -590,29 +601,37 @@ watchEffect(() => {
 }
 
 /* 统一按钮基础样式 */
-.fork, .close, .apply {
-  border: none;
-  background: none;
+.close, .apply {
+  border: 1px solid transparent;
+  background: transparent;
   cursor: pointer;
-  font-size: 15px;
-  padding: 4px 1px;    /* 增加点击区域 */
-  border-radius: 4px;   /* 添加圆角 */
-  transition: all 0.2s; /* 平滑过渡效果 */
-  margin-top: -2px;
-  color: #666;
+  font-size: 13px;
+  padding: 2px 3px;
+  border-radius: 4px;
+  transition: all 0.16s ease;
+  margin-top: 0;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.close:hover, .apply:hover {
+  background: var(--accent-soft);
+  border-color: rgba(47, 111, 159, 0.25);
 }
 
 .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85), 0 0 0 3px rgba(36, 49, 66, 0.12);
 }
 
 .count {
-  color: #666;
-  margin-top: 5px;
-  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .empty {
@@ -639,22 +658,10 @@ watchEffect(() => {
 }
 
 .panel.active {
-  transform: scale(1.01);
-  box-shadow: 0 6px 18px rgba(0,0,0,0.20);
+  transform: translateY(-1px);
+  border-color: rgba(47, 111, 159, 0.75) !important;
+  box-shadow: 0 0 0 2px rgba(47, 111, 159, 0.12), 0 10px 24px rgba(36, 49, 66, 0.12);
   z-index: 2;
-}
-
-.fork {
-  margin-left: auto;
-  border: none;
-  background: none;
-  cursor: pointer;
-  margin-top: 2px;
-}
-
-.fork:hover img {
-  /* 蓝色滤镜效果 */
-  filter: brightness(0) saturate(100%) invert(29%) sepia(89%) saturate(1686%) hue-rotate(200deg) brightness(96%) contrast(101%);
 }
 
 .apply {
@@ -681,17 +688,37 @@ watchEffect(() => {
 .empty-title {
   font-size: 15px;
   font-weight: 600;
+  color: var(--text-main);
 }
 
 .small-title {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title-stack {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.subtitle {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .empty-hint {
   margin-top: 6px;
-  font-size: 13px;
-  color: #bbb;
+  font-size: 12px;
+  color: var(--text-muted);
   text-align: center;
 }
 .close {
@@ -710,9 +737,10 @@ watchEffect(() => {
 .panel-controls {
   display: flex;
   gap: 6px;
-  padding: 6px 1px;
-  border-bottom: 1px solid #eee;
-  font-size: 15px;
+  padding: 5px 1px;
+  border-bottom: 1px solid var(--panel-border);
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .panel-controls .ctrl {
@@ -730,8 +758,9 @@ watchEffect(() => {
   width: 48px;
   padding: 2px 4px;
   border-radius: 4px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--panel-border);
   font-size: 12px;
+  color: var(--text-main);
 }
 
 /* 切片模式切换复选框 */
@@ -739,18 +768,18 @@ watchEffect(() => {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 13px;
-  color: #666;
+  font-size: 12px;
+  color: var(--text-muted);
   cursor: pointer;
   margin-left: 8px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: #f0f0f0;
+  background: var(--panel-soft);
   user-select: none;
 }
 
 .slice-mode:hover {
-  background: #e0e0e0;
+  background: var(--accent-soft);
 }
 
 .slice-mode input[type="checkbox"] {

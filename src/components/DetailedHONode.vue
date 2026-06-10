@@ -317,6 +317,8 @@ function render(data) {
         .style("cursor", "pointer")
         .on("click", (event) => {
           event.stopPropagation()
+          if (!brushStore.canEditActiveBrushFromRegion(currentSourceRegion.value.id)) return
+
           // brushStore.setActivePanelRegion("global", "global")
           brushStore.setActivePanelRegion(
               currentSourceRegion.value.id,
@@ -439,6 +441,8 @@ function drawStatesPanel(
         .style("cursor", "pointer")
         .on("click", (event) => {
           event.stopPropagation()
+          if (!brushStore.canEditActiveBrushFromRegion(currentSourceRegion.value.id)) return
+
           // brushStore.setActivePanelRegion("global", "global")
           brushStore.setActivePanelRegion(
               currentSourceRegion.value.id,
@@ -510,15 +514,18 @@ function drawStatesPanel(
 .wrap {
   width: 100%;
   top: 0;
-  height: 100vh;  /* 或者 100% 但确保父元素有高度 */
+  height: 100%;
   display: flex;
   flex-direction: column;
+  background: var(--panel-bg);
 }
 
 .chart-container {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  margin-left: 2px;
+  padding: 6px 2px 8px 4px;
 }
 
 /* 关键：让表头固定在顶部 */
@@ -526,28 +533,38 @@ function drawStatesPanel(
   position: sticky;
   top: 0;
   z-index: 100;
-  padding: 5px 5px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-  background: #f8f8f8;
-  font-size: 15px;
+  padding: 8px 9px;
+  background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
+  border-bottom: 1px solid var(--panel-border);
+  font-size: 12px;
   font-weight: 600;
-  color: #555;
+  color: var(--text-main);
+  letter-spacing: 0.01em;
 }
 
 svg {
   display: block;
-  background: #fff;
+  background: transparent;
 }
 
 .toolbar {
-margin-top: 10px;
+  padding: 8px;
+  border-bottom: 1px solid #edf1f5;
 }
 
 .search-input {
-  width: 260px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  border: 1px solid #ccc;
-  font-size: 15px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--panel-border);
+  font-size: 12px;
+  color: var(--text-main);
+  background: var(--panel-soft);
+}
+
+.search-input:focus {
+  outline: 2px solid rgba(47, 111, 159, 0.18);
+  border-color: rgba(47, 111, 159, 0.65);
+  background: #fff;
 }
 </style>

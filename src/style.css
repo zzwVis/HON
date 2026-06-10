@@ -1,34 +1,63 @@
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-  background-color: rgba(255, 255, 255, 255);
+:root {
+  font-family: Inter, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #243142;
+  background: #eef2f6;
+  font-synthesis: none;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  --paper-bg: #f3f6fa;
+  --panel-bg: #ffffff;
+  --panel-soft: #f8fafc;
+  --panel-border: #d8e0ea;
+  --panel-border-strong: #b9c5d3;
+  --text-main: #253244;
+  --text-muted: #6d7b8f;
+  --accent: #2f6f9f;
+  --accent-soft: #e8f1f7;
+  --shadow-soft: 0 8px 24px rgba(36, 49, 66, 0.08);
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(242, 246, 250, 0.85)),
+    var(--paper-bg);
 }
 
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
+  border-radius: 5px;
+  border: 1px solid var(--panel-border);
+  padding: 0.35rem 0.65rem;
+  font-size: 0.82rem;
   font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
+  color: var(--text-main);
+  background-color: #ffffff;
   cursor: pointer;
-  transition: border-color 0.25s;
+  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 button:hover {
-  border-color: #646cff;
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 button:focus,
 button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  outline: 2px solid rgba(47, 111, 159, 0.28);
+  outline-offset: 2px;
 }
 
 .card {
@@ -36,22 +65,21 @@ button:focus-visible {
 }
 
 #app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  margin: 0;
+  padding: 0;
+  text-align: left;
 }
 
 /*下拉框样式*/
 .my-select {
   margin-left: 1%;
-  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-family: inherit;
   line-height: 1.5;
-  border: 1px solid #dcdfe6;
-  border-radius: 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
   padding: 2px 5px;
-  font-size: 70%;
-  color: #606266;
+  font-size: 12px;
+  color: var(--text-main);
   background-color: #fff;
   cursor: pointer;
   outline: none;
@@ -62,16 +90,17 @@ button:focus-visible {
 /*悬浮框样式*/
 .tooltip {
   position: absolute;
-  padding: 12px;
-  background-color: #f8f9fa;
-  border:1px solid #ced4da;
-  border-radius:8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  color: #495057;
+  padding: 8px 10px;
+  background-color: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-soft);
+  color: var(--text-main);
   line-height: 1.4;
-  font-size: 14px;
+  font-size: 12px;
   opacity: 0;
   pointer-events: none;
+  backdrop-filter: blur(6px);
 }
 
 /*.mouseover-circle {*/
@@ -81,13 +110,13 @@ button:focus-visible {
 
 .my-button {
   margin-left: 1%;
-  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-family: inherit;
   line-height: 1.5;
-  border: 1px solid #dcdfe6;
-  border-radius: 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
   padding: 2px 5px;
-  font-size: 70%;
-  color: #606266;
+  font-size: 12px;
+  color: var(--text-main);
   background-color: #fff;
   cursor: pointer;
   outline: none;

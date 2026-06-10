@@ -4,6 +4,7 @@ import * as d3 from "d3"
 
 import { usePayloadStore } from "@/store/payloadStore"
 import { useRegionStore } from "@/store/regionStore"
+import { apiUrl } from "@/api"
 
 function parseEdgePairs(edgesObjOrArr) {
     const edges = Array.isArray(edgesObjOrArr)
@@ -86,6 +87,60 @@ function findSubsequenceIndex(seq, pattern) {
 
 function normalizeStateKey(k) {
     return String(k).replace(/[()']/g, "").trim()
+}
+
+function normalizeLogic(logic) {
+    return logic === "AND" ? "AND" : "OR"
+}
+
+function combineSeqSets(seqSets, logic = "OR") {
+    const sets = seqSets.filter(Boolean).map(s => new Set(s))
+    if (sets.length === 0) return new Set()
+
+    if (normalizeLogic(logic) === "AND") {
+        const result = new Set(sets[0])
+        for (const s of sets.slice(1)) {
+            for (const id of Array.from(result)) {
+                if (!s.has(id)) result.delete(id)
+            }
+        }
+        return result
+    }
+
+    const result = new Set()
+    sets.forEach(s => {
+        for (const id of s) result.add(id)
+    })
+    return result
+}
+
+function matchFilterGroup(values, logic, indexMap, normalizeValue = v => v) {
+    const items = Array.from(values || []).map(normalizeValue)
+    if (items.length === 0) return null
+
+    return combineSeqSets(
+        items.map(item => indexMap.get(item) || new Set()),
+        logic
+    )
+}
+
+function normalizeSourceId(sourceId) {
+    return !sourceId || sourceId === "root" ? "global" : sourceId
+}
+
+function brushSignature(b) {
+    if (!b) return ""
+    return JSON.stringify({
+        sourceRegionId: normalizeSourceId(b.sourceRegionId),
+        classes: Array.from(b.classes || []).map(String).sort(),
+        edges: Array.from(b.edges || []).map(String).sort(),
+        states: Array.from(b.states || []).map(normalizeStateKey).sort(),
+        groupLogic: {
+            classes: b.groupLogic?.classes || "AND",
+            edges: b.groupLogic?.edges || "AND",
+            states: b.groupLogic?.states || "AND",
+        }
+    })
 }
 
 function hasClassMatchOnTokenSeq(tok, b) {
@@ -283,7 +338,7 @@ export const useBrushStore = defineStore("brush", () => {
     }
 
     function renumberBrushes() {
-        const arr = Object.values(brushes.value)
+        const arr = Object.values(brushes.value).filter(b => b.saved)
 
         // 按创建时间排序，保证“谁先创建谁排前”
         arr.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
@@ -298,15 +353,23 @@ export const useBrushStore = defineStore("brush", () => {
     // 选择可以选状态，或者选类，或者选节点
     function createBrush(name) {
         const id = genId()
+        const nextName = name ?? `Filter ${Object.values(brushes.value).filter(b => b.saved).length + 1}`
         brushes.value[id] = {
             id,
-            name: name ?? "New Filter",
+            name: nextName,
             createdAt: Date.now(),   // ✅ 新增：用于稳定重排
+            saved: false,
             color: randomColor(),
 
             states: new Set(),
             classes: new Set(),
             edges: [],
+            sourceRegionId: normalizeSourceId(activePanelRegionId.value),
+            groupLogic: {
+                classes: "AND",
+                edges: "AND",
+                states: "AND"
+            },
 
             window: {
                 prev: null,
@@ -318,6 +381,63 @@ export const useBrushStore = defineStore("brush", () => {
         renumberBrushes()
 
         activeBrushId.value = id
+    }
+
+    function createBrushFromTemplate(templateId) {
+        const source = brushes.value[templateId]
+        if (!source) return null
+
+        const id = genId()
+        brushes.value[id] = {
+            id,
+            name: source.name,
+            createdAt: Date.now(),
+            saved: false,
+            color: randomColor(),
+            states: new Set(source.states || []),
+            classes: new Set(source.classes || []),
+            edges: [...(source.edges || [])],
+            sourceRegionId: normalizeSourceId(source.sourceRegionId),
+            groupLogic: {
+                classes: source.groupLogic?.classes || "AND",
+                edges: source.groupLogic?.edges || "AND",
+                states: source.groupLogic?.states || "AND"
+            },
+            window: {
+                prev: source.window?.prev ?? null,
+                next: source.window?.next ?? null,
+                mode: source.window?.mode ?? "split"
+            }
+        }
+
+        activeBrushId.value = id
+        commitActiveBrushToRegion()
+        return id
+    }
+
+    function findEquivalentSavedBrush(excludeId = null) {
+        const current = activeBrush.value
+        if (!current) return null
+
+        const signature = brushSignature(current)
+        return Object.values(brushes.value).find(b =>
+            b.saved &&
+            b.id !== excludeId &&
+            brushSignature(b) === signature
+        ) || null
+    }
+
+    function useEquivalentSavedBrushIfAny() {
+        const current = activeBrush.value
+        if (!current || current.saved) return current
+
+        const existing = findEquivalentSavedBrush(current.id)
+        if (!existing) return current
+
+        regionStore.replaceBrush(current.id, existing.id)
+        delete brushes.value[current.id]
+        activeBrushId.value = existing.id
+        return existing
     }
 
     function removeBrush(id) {
@@ -346,6 +466,12 @@ export const useBrushStore = defineStore("brush", () => {
         // 先切换 activeBrushId
         activeBrushId.value = id
 
+        const b = brushes.value[id]
+        if (b?.sourceRegionId) {
+            activePanelRegionId.value = normalizeSourceId(b.sourceRegionId)
+            activePanelType.value = activePanelRegionId.value === "global" ? "global" : "region"
+        }
+
         // 如果这个 brush 绑定了某个 region，则自动把该 region 设为 activeRegion
         if (id) {
             const entries = Object.entries(regionStore.regions || {})
@@ -362,12 +488,46 @@ export const useBrushStore = defineStore("brush", () => {
     // 例：全量图 panel：setActivePanelRegion("root","global")
     // 例：子图 panel：setActivePanelRegion(regionId,"region")
     function setActivePanelRegion(regionId = "root", type = "global") {
-        activePanelRegionId.value = regionId ?? "root"
+        const previousRegionId = normalizeSourceId(activePanelRegionId.value)
+        const nextRegionId = normalizeSourceId(regionId)
+
+        if (previousRegionId !== nextRegionId) {
+            regionStore.setHighlightDataFast(previousRegionId, null, null)
+        }
+
+        activePanelRegionId.value = nextRegionId
         activePanelType.value = type ?? "global"
+        if (activeBrush.value) {
+            activeBrush.value.sourceRegionId = nextRegionId
+        }
     }
 
     // ⭐ 新增：一个便捷 getter：当前这次刷选要作用的 region
     const activeRegionForBrush = computed(() => activePanelRegionId.value)
+
+    function canEditActiveBrushFromRegion(regionId = "global") {
+        const b = activeBrush.value
+        if (!b) return false
+        return normalizeSourceId(regionId) === normalizeSourceId(b.sourceRegionId || activePanelRegionId.value)
+    }
+
+    function setSourcePreviewForBrush(b, sourceRid) {
+        const sourceRegion = regionStore.regions[sourceRid]
+        const seqIds = sourceRid === "global"
+            ? (payloadStore.payload?.raw_sequences || []).map((_, index) => index)
+            : [...(sourceRegion?.sequenceIds || [])]
+
+        preview.value = {
+            targetRid: null,
+            sourceRid,
+            brushId: b?.id ?? null,
+            raw: null,
+            tok: null,
+            seqIds,
+            count: seqIds.length,
+            updatedAt: Date.now()
+        }
+    }
 
     function updateSourceInfoForBrush(b, sourceRid) {
         const regionsEntries = Object.entries(regionStore.regions || {})
@@ -416,6 +576,7 @@ export const useBrushStore = defineStore("brush", () => {
 
         if (!hasEdges && !hasStates && !hasClasses) {
             regionStore.setHighlightDataFast(sourceRid, highlightNodes, highlightEdges)
+            setSourcePreviewForBrush(b, sourceRid)
             return
         }
 
@@ -428,54 +589,28 @@ export const useBrushStore = defineStore("brush", () => {
 
         // -------- 2. index lookup --------
 
-        let candidateSeqIds = null
+        const groupLogic = b.groupLogic || {}
+        const groupResults = []
 
-        if (hasEdges){
-
-            for (const edge of edges){
-
-                const s = cache.edgeToSeqIds.get(edge)
-                if (!s) continue
-
-                if (!candidateSeqIds)
-                    candidateSeqIds = new Set(s)
-                else
-                    for (const id of s) candidateSeqIds.add(id)
-            }
-
-        }
-        else if (hasClasses){
-
-            for (const cls of classes){
-
-                const s = cache.classToSeqIds.get(String(cls))
-                if (!s) continue
-
-                if (!candidateSeqIds)
-                    candidateSeqIds = new Set(s)
-                else
-                    for (const id of s) candidateSeqIds.add(id)
-            }
-
-        }
-        else if (hasStates){
-
-            for (const state of states){
-
-                const key = normalizeStateKey(state)
-                const s = cache.stateToSeqIds.get(key)
-
-                if (!s) continue
-
-                if (!candidateSeqIds)
-                    candidateSeqIds = new Set(s)
-                else
-                    for (const id of s) candidateSeqIds.add(id)
-            }
-
+        if (hasEdges) {
+            groupResults.push(
+                matchFilterGroup(edges, groupLogic.edges || "AND", cache.edgeToSeqIds)
+            )
         }
 
-        if (!candidateSeqIds) return
+        if (hasClasses) {
+            groupResults.push(
+                matchFilterGroup(classes, groupLogic.classes || "AND", cache.classToSeqIds, v => String(v))
+            )
+        }
+
+        if (hasStates) {
+            groupResults.push(
+                matchFilterGroup(states, groupLogic.states || "AND", cache.stateToSeqIds, normalizeStateKey)
+            )
+        }
+
+        const candidateSeqIds = combineSeqSets(groupResults, "AND")
 
         // -------- 3. 与 source region 求交 --------
 
@@ -541,6 +676,7 @@ export const useBrushStore = defineStore("brush", () => {
 
         if (!hasEdges && !hasStates && !hasClasses) {
             regionStore.setHighlightDataFast(sourceRid, new Set(), new Set())
+            setSourcePreviewForBrush(b, sourceRid)
             return
         }
 
@@ -550,13 +686,18 @@ export const useBrushStore = defineStore("brush", () => {
                 : sourceRegion.sequenceIds
 
         try {
-            const res = await fetch("http://localhost:8000/api/filter_sequences", {
+            const res = await fetch(apiUrl("/api/filter_sequences"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     edges: edges,
                     classes: Array.from(classes || []),
                     states: Array.from(states || []),
+                    group_logic: {
+                        classes: b.groupLogic?.classes || "AND",
+                        edges: b.groupLogic?.edges || "AND",
+                        states: b.groupLogic?.states || "AND"
+                    },
                     source_seq_ids: sourceSeqIds
                 })
             })
@@ -653,6 +794,101 @@ export const useBrushStore = defineStore("brush", () => {
         commitActiveBrushToRegion()
     }
 
+    function addClass(cls) {
+        const b = activeBrush.value
+        if (!b || cls == null || cls === "") return
+
+        b.classes.add(String(cls))
+        commitActiveBrushToRegion()
+    }
+
+    function addEdge(edgeKey) {
+        const b = activeBrush.value
+        if (!b || !edgeKey) return
+
+        if (!b.edges.includes(edgeKey)) {
+            b.edges.push(edgeKey)
+        }
+        commitActiveBrushToRegion()
+    }
+
+    function addState(stateKey) {
+        const b = activeBrush.value
+        if (!b || !stateKey) return
+
+        b.states.add(String(stateKey))
+        commitActiveBrushToRegion()
+    }
+
+    function setGroupLogic(groupKey, logic) {
+        const b = activeBrush.value
+        if (!b || !groupKey) return
+
+        b.groupLogic = {
+            ...(b.groupLogic || {}),
+            [groupKey]: logic === "AND" ? "AND" : "OR"
+        }
+
+        commitActiveBrushToRegion()
+    }
+
+    function removeGroupValue(groupKey, value) {
+        const b = activeBrush.value
+        if (!b) return
+
+        if (groupKey === "classes") {
+            b.classes.delete(String(value))
+        } else if (groupKey === "edges") {
+            b.edges = (b.edges || []).filter(edge => edge !== value)
+        } else if (groupKey === "states") {
+            b.states.delete(String(value))
+        }
+
+        commitActiveBrushToRegion()
+    }
+
+    function clearGroup(groupKey) {
+        const b = activeBrush.value
+        if (!b) return
+
+        if (groupKey === "classes") {
+            b.classes = new Set()
+        } else if (groupKey === "edges") {
+            b.edges = []
+        } else if (groupKey === "states") {
+            b.states = new Set()
+        }
+
+        commitActiveBrushToRegion()
+    }
+
+    function saveActiveBrush() {
+        const id = activeBrushId.value
+        const b = id ? brushes.value[id] : null
+        if (!b) return
+
+        const existing = findEquivalentSavedBrush(id)
+        if (existing) {
+            if (!b.saved) {
+                regionStore.replaceBrush(id, existing.id)
+                delete brushes.value[id]
+            }
+            activeBrushId.value = existing.id
+            return existing.id
+        }
+
+        const wasSaved = Boolean(b.saved)
+        brushes.value = {
+            ...brushes.value,
+            [id]: {
+                ...b,
+                saved: true,
+                name: wasSaved ? b.name : `Filter ${Object.values(brushes.value).filter(item => item.saved).length + 1}`
+            }
+        }
+        return id
+    }
+
 
     function applyPreviewToSelectedRegion(targetRegionId) {
         const p = preview.value
@@ -668,7 +904,6 @@ export const useBrushStore = defineStore("brush", () => {
         const raw = ids.map(sid => fullRaw[sid]).filter(Boolean)
         const tok = ids.map(sid => fullTok[sid]).filter(Boolean)
 
-        if (!raw.length || !tok.length) return
         regionStore.setBaseSequencesFast(rid, raw, tok, ids)
 
         const sourceRegion = regionStore.regions[p.sourceRid]
@@ -689,7 +924,6 @@ export const useBrushStore = defineStore("brush", () => {
         const ids = p.seqIds || []
         const raw = ids.map(sid => fullRaw[sid]).filter(Boolean)
         const tok = ids.map(sid => fullTok[sid]).filter(Boolean)
-        if (!raw.length || !tok.length) return
 
         regionStore.setBaseSequencesFast(
             targetRid,
@@ -723,15 +957,26 @@ export const useBrushStore = defineStore("brush", () => {
         activePanelRegionId,
         activePanelType,
         setActivePanelRegion,
+        canEditActiveBrushFromRegion,
         activeRegionForBrush,
 
         createBrush,
+        createBrushFromTemplate,
         removeBrush,
         clearBrushEdges,
         setActiveBrush,
         toggleEdge,
         toggleState,
         toggleClass,
+        addClass,
+        addEdge,
+        addState,
+        setGroupLogic,
+        removeGroupValue,
+        clearGroup,
+        saveActiveBrush,
+        findEquivalentSavedBrush,
+        useEquivalentSavedBrushIfAny,
         commitActiveBrushToRegion,
 
         // 点击了之后才画图

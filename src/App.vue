@@ -61,9 +61,10 @@ const regionStore = useRegionStore()
   width: 100vw;
   left: 0;
   top: 0;
-  gap: 16px;
-  padding: 8px;
+  gap: 12px;
+  padding: 12px;
   box-sizing: border-box;
+  background: var(--paper-bg);
 }
 
 /* 三列的通用样式 */
@@ -73,12 +74,12 @@ const regionStore = useRegionStore()
   display: flex;
   flex-direction: column;
   min-width: 0;
-  gap: 16px;
+  gap: 12px;
 }
 
 /* 左列 */
 .left-column {
-  flex: 2;
+  flex: 2.15;
   min-width: 0;
 }
 
@@ -86,27 +87,28 @@ const regionStore = useRegionStore()
 .middle-column {
   flex: 11;
   min-width: 0;
-  border: 1px solid #c0c0c0;
-  border-radius: 4px;
-  background-color: #ffffff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background-color: var(--panel-bg);
+  box-shadow: var(--shadow-soft);
   overflow: hidden;
-  padding: 8px;
+  padding: 9px;
 }
 
 /* 右列：占2/6宽度 */
 .right-column {
-  flex: 2;
+  flex: 2.1;
   min-width: 0;
 }
 
 /* 单元格通用样式 */
 .cell {
+  position: relative;
   min-height: 0;
-  border: 1px solid #c0c0c0;
-  border-radius: 4px;
-  background-color: #ffffff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background-color: var(--panel-bg);
+  box-shadow: var(--shadow-soft);
   overflow: hidden;
 }
 
@@ -124,7 +126,7 @@ const regionStore = useRegionStore()
 .right-column {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 .right-column .bottom-right {
@@ -135,9 +137,9 @@ const regionStore = useRegionStore()
 /* 中列网格容器 - 修改为2x2布局，底部合并为一行 */
 .grid-container {
   display: grid;
-  grid-template-columns: 3fr 5fr; /* 2列 */
-  grid-template-rows: 2fr 3fr; /* 2行，但底部单元格将占据整行 */
-  gap: 8px; /* 网格之间的间隙 */
+  grid-template-columns: minmax(360px, 3fr) minmax(520px, 5fr);
+  grid-template-rows: minmax(310px, 2fr) minmax(420px, 3fr);
+  gap: 9px;
   height: 100%;
   width: 100%;
   box-sizing: border-box;
@@ -145,10 +147,22 @@ const regionStore = useRegionStore()
 
 /* 网格单元格 */
 .grid-cell {
-  border: 1px solid black;
-  border-radius: 4px;
-  background-color: #f8f8f8;
+  position: relative;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background-color: var(--panel-bg);
   overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+.grid-cell::before,
+.cell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 /* 合并底部区域 - 新增样式 */
@@ -171,12 +185,12 @@ const regionStore = useRegionStore()
 }
 
 .top-right{
-  background-color: #ffffff;
+  background-color: var(--panel-bg);
 }
 
 .bottom-right {
-  border: none;
-  background: white;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
 }
 
 
@@ -207,8 +221,10 @@ const regionStore = useRegionStore()
 }
 
 .container-active {
-  transform: scale(1.01);
-  box-shadow: 0 6px 18px rgba(0,0,0,0.20);
+  border-color: rgba(47, 111, 159, 0.65);
+  box-shadow: 0 0 0 2px rgba(47, 111, 159, 0.12), var(--shadow-soft);
+  transform: translateY(-1px);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
 </style>

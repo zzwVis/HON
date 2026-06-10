@@ -1,551 +1,958 @@
 <script setup>
-import { watch, computed } from "vue"
-import * as d3 from "d3"
+import { computed, ref, watch } from "vue"
 import { useBrushStore } from "@/store/brushStore.js"
-const brushStore = useBrushStore()
 import { useRegionStore } from "@/store/regionStore.js"
-const regionStore = useRegionStore()
 import { usePayloadStore } from "@/store/payloadStore.js"
+
+const brushStore = useBrushStore()
+const regionStore = useRegionStore()
 const payloadStore = usePayloadStore()
-import { ref, onMounted } from "vue"
-import { nextTick } from "vue"
 
-const treemapRef = ref(null)
-const layoutWidth = ref(220)
-const expanded = ref(new Set(["global"]))  // 默认展开 root
+const activeFilter = computed(() => brushStore.activeBrush)
+const preview = computed(() => brushStore.preview)
+const conditionType = ref("HO_NODE")
+const conditionSearch = ref("")
+const sourceEditing = ref(false)
+const savedFilters = computed(() =>
+  Object.values(brushStore.brushes).filter(filter => filter.saved)
+)
 
-function toggleExpand(id) {
-  if (expanded.value.has(id)) {
-    expanded.value.delete(id)
-  } else {
-    expanded.value.add(id)
-  }
-}
+const conditionTypes = [
+  { value: "HO_NODE", label: "Higher-order Node" },
+  { value: "HO_EDGE", label: "Higher-order Transition" },
+  { value: "STATE", label: "First-order State" },
+  { value: "STATE_TRANSITION", label: "First-order Transition" }
+]
 
+const sourceOptions = computed(() => {
+  return Object.values(regionStore.regions)
+    .filter(r => r.id === "global" || r.applied)
+    .map(r => ({
+      id: r.id,
+      label: regionOptionLabel(r),
+      disabled: false
+    }))
+})
 
-onMounted(async () => {
-  await nextTick()
-
-  if (treemapRef.value) {
-    layoutWidth.value = treemapRef.value.clientWidth
+const currentSourceId = computed({
+  get() {
+    const id = brushStore.activePanelRegionId || "global"
+    return id === "root" ? "global" : id
+  },
+  set(id) {
+    brushStore.setActivePanelRegion(id, id === "global" ? "global" : "region")
+    brushStore.commitActiveBrushToRegion()
   }
 })
 
-function collectIds(node, out = []) {
-  out.push(node.id)
+const sourceLabel = computed(() => {
+  const id = currentSourceId.value
+  if (id === "global") return "Global"
+  return `Region ${id}`
+})
 
-  if (node.children) {
-    node.children.forEach(c => collectIds(c, out))
-  }
+const hoNodeOptions = computed(() => {
+  const glyph = payloadStore.payload?.glyph || {}
+  return Object.keys(glyph)
+    .sort((a, b) => Number(a) - Number(b))
+    .map(cls => ({ value: cls, label: `node ${cls}` }))
+})
 
-  return out
-}
+const hoEdgeOptions = computed(() => {
+  const seen = new Set()
+  const raw = payloadStore.payload?.raw_sequences || []
 
-function flattenTree(node, depth = 0, out = []) {
-  out.push({
-    id: node.id,
-    name: node.name,
-    depth,
-    hasChildren: node.children?.length > 0
+  raw.forEach(seq => {
+    if (!Array.isArray(seq)) return
+    for (let i = 0; i < seq.length - 1; i++) {
+      seen.add(`node${seq[i]}→node${seq[i + 1]}`)
+    }
   })
 
-  if (!expanded.value.has(node.id)) return out
-
-  if (node.children) {
-    node.children.forEach(c =>
-        flattenTree(c, depth + 1, out)
-    )
-  }
-
-  return out
-}
-
-const brushTreeList = computed(() => {
-  return flattenTree(brushTreeRoot.value)
+  return Array.from(seen)
+    .sort()
+    .map(edge => ({ value: edge, label: edge.replaceAll("node", "") }))
 })
 
-function statesByClass(b) {
-  const glyph = payloadStore.payload?.glyph
-  if (!glyph) {
-    return { grouped: {}, ungrouped: [] }
-  }
+const stateOptions = computed(() => {
+  const seen = new Set()
+  const seqs = payloadStore.payload?.first_order_sequences || []
 
-  const grouped = {}
-  const usedStates = new Set()
+  seqs.forEach(seq => {
+    if (!Array.isArray(seq)) return
+    seq.forEach(token => seen.add(cleanToken(token)))
+  })
 
-  // 1️⃣ 先处理 class → states
-  for (const cls of b.classes) {
-    const states = glyph[cls]?.unique_states || []
+  return Array.from(seen)
+    .filter(Boolean)
+    .sort()
+    .map(value => ({ value, label: value }))
+})
 
-    const selected = states
-        .map(st => payloadStore.stateKey(st))
-        .filter(k => b.states.has(k))
+const stateTransitionOptions = computed(() => {
+  const seen = new Set()
+  const seqs = payloadStore.payload?.first_order_sequences || []
 
-    if (selected.length) {
-      grouped[cls] = selected
-      selected.forEach(s => usedStates.add(s))
+  seqs.forEach(seq => {
+    if (!Array.isArray(seq)) return
+    const cleaned = seq.map(cleanToken)
+    for (let i = 0; i < cleaned.length - 1; i++) {
+      if (cleaned[i] && cleaned[i + 1]) {
+        seen.add(`${cleaned[i]}→${cleaned[i + 1]}`)
+      }
     }
+  })
+
+  return Array.from(seen)
+    .sort()
+    .map(value => ({ value, label: value }))
+})
+
+const presetOptions = computed(() => {
+  if (conditionType.value === "HO_NODE") return hoNodeOptions.value
+  if (conditionType.value === "HO_EDGE") return hoEdgeOptions.value
+  if (conditionType.value === "STATE") return stateOptions.value
+  if (conditionType.value === "STATE_TRANSITION") return stateTransitionOptions.value
+  return []
+})
+
+watch(conditionType, () => {
+  conditionSearch.value = ""
+})
+
+const filteredPresetOptions = computed(() => {
+  const q = conditionSearch.value.trim().toLowerCase()
+  if (!q) return presetOptions.value.slice(0, 80)
+
+  return presetOptions.value
+    .filter(option =>
+      option.label.toLowerCase().includes(q) ||
+      String(option.value).toLowerCase().includes(q)
+    )
+    .slice(0, 120)
+})
+
+const conditionGroups = computed(() => {
+  const b = activeFilter.value
+  if (!b) return []
+
+  const groups = []
+
+  if (b.classes?.size) {
+    groups.push({
+      key: "classes",
+      type: "Higher-order Node",
+      logic: b.groupLogic?.classes || "AND",
+      values: Array.from(b.classes).map(cls => ({
+        value: String(cls),
+        label: `node ${cls}`
+      }))
+    })
   }
 
-  // 2️⃣ 再找“没有被任何 class 吸收的 state”
-  const ungrouped = Array.from(b.states)
-      .filter(s => !usedStates.has(s))
+  if (b.edges?.length) {
+    groups.push({
+      key: "edges",
+      type: "Higher-order Transition",
+      logic: b.groupLogic?.edges || "AND",
+      values: b.edges.map(edge => ({
+        value: edge,
+        label: edge.replaceAll("node", "")
+      }))
+    })
+  }
 
-  return { grouped, ungrouped }
+  if (b.states?.size) {
+    groups.push({
+      key: "states",
+      type: "First-order State / Transition",
+      logic: b.groupLogic?.states || "AND",
+      values: Array.from(b.states).map(state => ({
+        value: String(state),
+        label: String(state)
+      }))
+    })
+  }
+
+  return groups
+})
+
+const canPreview = computed(() => Boolean(activeFilter.value))
+const canApply = computed(() =>
+  Boolean(
+    activeFilter.value &&
+    conditionGroups.value.length > 0 &&
+    preview.value?.brushId === activeFilter.value.id &&
+    preview.value?.count != null
+  )
+)
+
+function startBlankFilter() {
+  brushStore.setActivePanelRegion("global", "global")
+  brushStore.createBrush()
 }
 
-
-function shorten(key) {
-  // A->B 形式可直接显示
-  return key
+function cleanToken(token) {
+  return String(token ?? "").replace(/[()']/g, "").trim()
 }
 
-function activateBrush(id) {
+function isPresetSelected(value) {
+  const filter = activeFilter.value
+  if (!filter) return false
+
+  if (conditionType.value === "HO_NODE") {
+    return filter.classes?.has(String(value))
+  }
+
+  if (conditionType.value === "HO_EDGE") {
+    return filter.edges?.includes(value)
+  }
+
+  return filter.states?.has(String(value))
+}
+
+function togglePreset(value) {
+  if (!activeFilter.value) startBlankFilter()
+
+  if (isPresetSelected(value)) {
+    if (conditionType.value === "HO_NODE") {
+      brushStore.removeGroupValue("classes", value)
+    } else if (conditionType.value === "HO_EDGE") {
+      brushStore.removeGroupValue("edges", value)
+    } else {
+      brushStore.removeGroupValue("states", value)
+    }
+    return
+  }
+
+  if (conditionType.value === "HO_NODE") {
+    brushStore.addClass(value)
+  } else if (conditionType.value === "HO_EDGE") {
+    brushStore.addEdge(value)
+  } else {
+    brushStore.addState(value)
+  }
+}
+
+function toggleGroupLogic(group) {
+  brushStore.setGroupLogic(group.key, group.logic === "AND" ? "OR" : "AND")
+}
+
+function removeGroup(group) {
+  brushStore.clearGroup(group.key)
+}
+
+function removeGroupValue(group, value) {
+  brushStore.removeGroupValue(group.key, value)
+}
+
+function regionOptionLabel(region) {
+  if (region.id === "global") return "Global View"
+  const brush = region.brushId ? brushStore.brushes[region.brushId] : null
+  const count = Array.isArray(region.sequenceIds) ? region.sequenceIds.length : 0
+  const filterName = brush?.name ? ` · ${brush.name}` : ""
+  const countText = region.applied ? ` · ${count} seqs` : " · empty"
+  return `Region ${region.id}${filterName}${countText}`
+}
+
+function editSavedFilter(id) {
   brushStore.setActiveBrush(id)
 }
 
-function sourceLabel(b) {
-  const regions = Object.values(regionStore.regions)
-
-  const r = regions.find(r => r.brushId === b.id)
-  if (!r) return null
-
-  // 没有来源
-  if (!r.sourceBrushId) return null
-
-  // 找来源的 brush
-  const srcBrush = brushStore.brushes[r.sourceBrushId]
-
-  return srcBrush ? srcBrush.name : "Global"
+function copySavedFilter(id) {
+  const nextId = brushStore.createBrushFromTemplate(id)
+  if (nextId) {
+    brushStore.commitActiveBrushToRegion()
+  }
 }
 
-// 当刷子被删除的时候，她对应的视图也应该被删除
-function removeBrushAndClear(bid) {
-  brushStore.removeBrush(bid)
-  regionStore.clearBrush(bid)
+function regionIdForFilter(filterId) {
+  const found = Object.values(regionStore.regions).find(region =>
+    region.id !== "global" &&
+    region.id !== "root" &&
+    region.applied &&
+    region.brushId === filterId
+  )
+  return found?.id || null
 }
 
-// ===== 基于 source 信息构造 brush 层次结构，并用矩形树图布局 =====
-const brushTreeRoot = computed(() => {
+function regionLabelForFilter(filterId) {
+  const rid = regionIdForFilter(filterId)
+  return rid ? `Region ${rid}` : "No view"
+}
 
-  const brushes = brushStore.brushes
-  const regions = regionStore.regions
+function applyFilter() {
+  if (!canApply.value) return
+  const filter = brushStore.useEquivalentSavedBrushIfAny()
+  const filterId = filter?.id || brushStore.activeBrushId
+  const existingRid = regionIdForFilter(filterId)
+  const targetRid = existingRid || regionStore.fork()
+  if (!targetRid) return
 
-  const nodes = {}
-
-  for (const b of Object.values(brushes)) {
-    nodes[b.id] = {
-      id: b.id,
-      name: b.name,
-      children: []
-    }
+  applyPreviewToRegion(targetRid, filterId)
+  if (regionStore.activeRegionId !== targetRid) {
+    regionStore.setActive(targetRid)
   }
+}
 
-  const root = {
-    id: "global",
-    name: "Global",
-    children: []
+function applyPreviewToRegion(targetRid, filterId = brushStore.activeBrushId) {
+  regionStore.assignBrush(targetRid, filterId)
+  brushStore.applyPreviewToSelectedRegion(targetRid)
+  regionStore.applyRegion(targetRid)
+
+  const sourceRid = preview.value?.sourceRid
+  if (sourceRid) regionStore.setHighlightData(sourceRid, null, null)
+}
+
+function saveAsFilter() {
+  if (!activeFilter.value) {
+    startBlankFilter()
+    return
   }
+  brushStore.saveActiveBrush()
+}
 
-  for (const b of Object.values(brushes)) {
+function clearDraft() {
+  const sourceRid = preview.value?.sourceRid
+  if (sourceRid) regionStore.setHighlightData(sourceRid, null, null)
+  const activeId = brushStore.activeBrushId
+  const active = activeFilter.value
+  if (!activeId || !active) return
 
-    const r = Object.values(regions).find(r => r.brushId === b.id)
-
-    if (!r || r.sourceBrushId == null) continue
-
-    const src = r.sourceBrushId
-
-    if (src === "global") {
-      root.children.push(nodes[b.id])
-    }
-    else if (nodes[src]) {
-      nodes[src].children.push(nodes[b.id])
-    }
-
+  if (active.saved) {
+    brushStore.setActiveBrush(activeId)
+  } else {
+    brushStore.removeBrush(activeId)
   }
+}
 
-  return root   // ★ 关键
-})
-
-watch(
-    () => brushTreeRoot.value,
-    (root) => {
-      if (!root) return
-
-      const ids = collectIds(root)
-
-      expanded.value = new Set(ids)
-    },
-    { immediate: true }
-)
-
+function removeFilter(id) {
+  brushStore.removeBrush(id)
+  regionStore.clearBrush(id)
+}
 </script>
 
 <template>
-  <div class="brush-panel">
-    <!-- 矩形树图展示 brush 之间的层次结构 -->
-    <div class="brush-tree">
-
-      <div
-          v-for="node in brushTreeList"
-          :key="node.id"
-          class="tree-row"
-          :style="{ paddingLeft: (node.depth * 14) + 'px' }"
-      >
-
-        <!-- 展开按钮 -->
-        <span
-            v-if="node.hasChildren"
-            class="toggle"
-            :class="{ expanded: expanded.has(node.id) }"
-            @click.stop="toggleExpand(node.id)"
-        >
-          <svg
-              class="arrow-icon"
-              width="12"
-              height="12"
-              viewBox="0 0 12 12"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-          >
-            <path
-                d="M4 2L8 6L4 10"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-            />
-          </svg>
-        </span>
-
-        <span
-            v-else
-            class="toggle-placeholder"
-        />
-
-        <!-- 颜色点 -->
-        <span
-            v-if="node.id !== 'global'"
-            class="dot"
-            :style="{background: brushStore.brushes[node.id]?.color}"
-        />
-
-        <!-- 名字 -->
-        <span
-            class="tree-name"
-            @click="node.id !== 'global' && activateBrush(node.id)"
-        >
-      {{ brushStore.brushes[node.id]?.name || node.name }}
-    </span>
-
+  <aside class="filter-panel">
+    <section class="definition">
+      <div class="panel-title">
+        <div>
+          <div class="eyebrow">Filter Definition</div>
+        </div>
+        <button class="icon-btn" title="Start a blank filter" @click="startBlankFilter">+</button>
       </div>
 
-    </div>
-
-    <div style = "border: 1px solid #c0c0c0;height: 100%">
-      <button class="new-btn"
-              @click="brushStore.createBrush()">
-        + New Filter
-      </button>
-
-      <div
-          v-for="b in Object.values(brushStore.brushes)"
-          :key="b.id"
-          class="brush-card"
-          :class="{ active: b.id === brushStore.activeBrushId }"
-      >
-
-        <!-- 顶部栏 -->
-        <div class="brush-header"
-             @click="activateBrush(b.id)">
-
-          <span class="dot"
-                :style="{background:b.color}">
-          </span>
-
-          <span class="name">{{ b.name }}</span>
-          <span v-if="sourceLabel(b)" class="name">
-            source: {{ sourceLabel(b) }}
-          </span>
-
-          <!--          <span class="count">-->
-          <!--            ({{ b.edges.length }} sequences)-->
-          <!--          </span>-->
-
-          <button class="del"
-                  @click.stop="removeBrushAndClear(b.id)">
-            ✕
-          </button>
-        </div>
-
-        <!-- 按 class 分组的状态列表 -->
-        <div v-if="b.classes && b.classes.size" class="section-block">
-          <div class="class-title">
-            nodes:
+      <div class="draft-card" :class="{ empty: !activeFilter }">
+        <template v-if="activeFilter">
+          <div class="draft-header">
+            <span class="dot" :style="{ background: activeFilter.color }" />
+            <div class="draft-name">
+              <strong>{{ activeFilter.name }}</strong>
+              <button
+                v-if="!sourceEditing"
+                class="source-link"
+                title="Change filter source"
+                @click="sourceEditing = true"
+              >
+                Source: {{ sourceLabel }}
+              </button>
+              <select
+                v-else
+                v-model="currentSourceId"
+                class="inline-source-select"
+                @change="sourceEditing = false"
+                @blur="sourceEditing = false"
+              >
+                <option
+                  v-for="option in sourceOptions"
+                  :key="option.id"
+                  :value="option.id"
+                  :disabled="option.disabled"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
           </div>
-          <div
-              v-for="(cls, i) in b.classes"
-              :key="cls"
-              class="class-block"
-          >
-            <div class="state-item">
-              {{ i + 1 }}. node {{ cls }}
+
+          <div class="condition-builder">
+            <div class="builder-head">
+              <label>Condition Builder</label>
+            </div>
+            <select v-model="conditionType">
+              <option
+                v-for="type in conditionTypes"
+                :key="type.value"
+                :value="type.value"
+              >
+                {{ type.label }}
+              </option>
+            </select>
+
+            <input
+              v-model="conditionSearch"
+              placeholder="Search candidates..."
+            />
+
+            <div class="checkbox-list">
+              <label
+                v-for="option in filteredPresetOptions"
+                :key="option.value"
+                class="check-row"
+              >
+                <input
+                  type="checkbox"
+                  :checked="isPresetSelected(option.value)"
+                  @change="togglePreset(option.value)"
+                />
+                <span>{{ option.label }}</span>
+              </label>
+              <div v-if="!filteredPresetOptions.length" class="no-options">
+                No matching candidates.
+              </div>
             </div>
 
-            <!--        <div-->
-            <!--            v-for="(s,i) in states"-->
-            <!--            :key="s"-->
-            <!--            class="state-item"-->
-            <!--        >-->
-            <!--          {{ i+1 }}. {{ shorten(s) }}-->
-            <!--        </div>-->
-
-          </div>
-        </div>
-
-        <!-- 没有归属 class 的 state -->
-        <div
-            v-if="statesByClass(b).ungrouped.length > 0"
-            class="class-block ungrouped"
-        >
-          <div class="class-title">
-            states:
           </div>
 
-          <div
-              v-for="(s, i) in statesByClass(b).ungrouped"
-              :key="s"
-              class="state-item"
-          >
-            {{ i + 1 }}. {{ shorten(s) }}
-          </div>
-        </div>
+          <div class="groups">
+            <div v-if="!conditionGroups.length" class="empty-state">
+              Select in a view or choose candidates from the checkbox list.
+            </div>
 
-        <!-- 边列表 -->
-        <div v-if="b.edges && b.edges.length > 0" class="section-block">
-          <div class="section-title">
-            edges:
+            <div
+              v-for="(group, index) in conditionGroups"
+              :key="group.type"
+              class="group-card"
+            >
+              <div class="group-head">
+                <span>Group {{ index + 1 }}</span>
+                <span class="group-actions">
+                  <button class="logic" @click="toggleGroupLogic(group)">
+                    {{ group.logic }}
+                  </button>
+                  <button class="remove-group" title="Remove group" @click="removeGroup(group)">x</button>
+                </span>
+              </div>
+              <div class="group-type">{{ group.type }}</div>
+              <div class="chips">
+                <span
+                  v-for="item in group.values"
+                  :key="item.value"
+                  class="chip"
+                >
+                  <span>{{ item.label }}</span>
+                  <button
+                    class="chip-remove"
+                    title="Remove condition"
+                    @click="removeGroupValue(group, item.value)"
+                  >
+                    x
+                  </button>
+                </span>
+              </div>
+            </div>
           </div>
+        </template>
 
-          <div
-              v-for="(e, i) in b.edges"
-              :key="e"
-              class="section-item edge-item"
-          >
-            {{ i + 1 }}. {{ shorten(e) }}
+        <template v-else>
+          <div class="empty-state">
+            <p>Use the + button above to create a new filter.</p>
           </div>
-        </div>
-
+        </template>
       </div>
-    </div>
-  </div>
+
+      <div class="preview-box" :class="{ active: preview?.count > 0 }">
+        <span>Preview</span>
+        <strong>{{ preview?.count || 0 }} seqs</strong>
+      </div>
+
+      <div class="actions">
+        <button :disabled="!canApply" @click="applyFilter">
+          Apply
+        </button>
+        <button :disabled="!canPreview" @click="saveAsFilter">
+          Save
+        </button>
+        <button :disabled="!canPreview" @click="clearDraft">
+          Clear
+        </button>
+      </div>
+    </section>
+
+    <section class="saved">
+      <div class="saved-title">
+        <span>Saved Filters</span>
+        <span>{{ savedFilters.length }}</span>
+      </div>
+
+      <div v-if="!savedFilters.length" class="empty-list">
+        No saved filters yet.
+      </div>
+
+      <div
+        v-for="filter in savedFilters"
+        :key="filter.id"
+        class="saved-row"
+        :class="{ active: filter.id === brushStore.activeBrushId }"
+        title="Edit this filter"
+        @click="editSavedFilter(filter.id)"
+      >
+        <span class="dot" :style="{ background: filter.color }" />
+        <div class="saved-meta">
+          <strong>{{ filter.name }}</strong>
+          <span>
+            {{ filter.edges.length }} edges,
+            {{ filter.classes.size }} nodes,
+            {{ filter.states.size }} states
+          </span>
+          <em>{{ regionLabelForFilter(filter.id) }}</em>
+        </div>
+        <button class="copy-btn" title="Copy filter" @click.stop="copySavedFilter(filter.id)">+</button>
+        <button class="delete-btn" @click.stop="removeFilter(filter.id)">x</button>
+      </div>
+    </section>
+  </aside>
 </template>
 
 <style scoped>
-.brush-panel {
-  width: 220px;
+.filter-panel {
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  font-size: 15px;
+  gap: 10px;
+  padding: 8px;
+  background: var(--panel-bg);
+  color: var(--text-main);
+  font-size: 11px;
 }
 
-.new-btn {
-  width: 100%;
-  padding: 4px;
-  background: #f6f6f6;
-  font-weight: 600;
-  color: #555;
-  border: 1px solid #dcdfe6;
-  transition: all 0.2s ease;
-  margin: 4px
-}
-
-.brush-card {
-  border: 1px solid #ccc;
-  border-radius: 4px;
+.definition,
+.saved {
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: #fff;
   overflow: hidden;
-  margin-left: 4px;
-  margin-right: 4px;
 }
 
-.brush-card.active {
-  border:2px solid #4a90e2;
+.definition {
+  flex: 1.3;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-.brush-header {
+.saved {
+  flex: 0.9;
+  min-height: 170px;
+  overflow: auto;
+}
+
+.panel-title,
+.saved-title {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  cursor: pointer;
-  background: #f7f7f7;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
+  border-bottom: 1px solid var(--panel-border);
 }
 
-.brush-header:hover {
-  background: #ececec;
+.eyebrow {
+  color: var(--text-main);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.icon-btn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.draft-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 8px;
+  background:
+    linear-gradient(90deg, rgba(216, 224, 234, 0.26) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(216, 224, 234, 0.2) 1px, transparent 1px),
+    #fbfcfe;
+  background-size: 24px 24px;
+}
+
+.draft-card.empty {
+  justify-content: center;
+}
+
+.draft-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 9px;
 }
 
 .dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(36, 49, 66, 0.12);
 }
 
-.name {
-  flex: 1;
+.draft-name,
+.saved-meta {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
 }
 
-.count {
-  color: #888;
+.draft-name strong,
+.saved-meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.del {
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: #c00;
+.draft-name span,
+.saved-meta span {
+  color: var(--text-muted);
+  font-size: 10px;
 }
 
-.edge-item {
-  font-size: 15px;
-  color: #333;
+.source-link {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.state-item {
-  font-size: 14px;
-  color: #333;
+.source-link:hover {
+  color: var(--accent);
+  background: transparent;
+  text-decoration: underline;
 }
 
-.class-block {
-  padding: 6px 10px;
-  background: #fafafa;
-}
-
-.class-title {
-  font-weight: 600;
-  color: #333;
-  margin-bottom: 4px;
-}
-
-.state-item {
-  font-size: 14px;
-  padding-left: 12px;
-  color: #555;
-}
-
-.section-block {
-  padding: 6px 10px;
-  background: #fafafa;
-  border-top: 1px dashed #e0e0e0;
-}
-
-.section-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #333;
-  margin-bottom: 4px;
-  text-transform: lowercase;
-}
-
-.dot {
-  width:10px;
-  height:10px;
-  border-radius:50%;
-}
-
-.brush-tree {
-  border: 1px solid #e4e7ed;
-  position: relative;
-  height: 30%;
-  background: white;
+.inline-source-select {
   width: 100%;
-  border-radius: 6px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
-  transition: all 0.2s ease;
-  overflow-y: auto;
-  overflow-x: hidden;  /* 隐藏水平滚动条 */
+  min-height: 24px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--text-main);
+  padding: 0 6px;
+  font: inherit;
+  font-size: 11px;
 }
 
-.tree-row {
+.condition-builder {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 9px;
+  padding: 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.builder-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.condition-builder label {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.condition-builder select,
+.condition-builder input {
+  width: 100%;
+  min-height: 27px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  background: var(--panel-soft);
+  color: var(--text-main);
+  padding: 0 7px;
+  font: inherit;
+  font-size: 11px;
+}
+
+.condition-builder input:focus,
+.condition-builder select:focus {
+  outline: 2px solid rgba(47, 111, 159, 0.18);
+  border-color: rgba(47, 111, 159, 0.55);
+  background: #fff;
+}
+
+.condition-builder button {
+  min-height: 22px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.checkbox-list {
+  max-height: 76px;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.check-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.check-row:hover {
+  background: var(--accent-soft);
+}
+
+.check-row input {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+.check-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.no-options {
+  padding: 8px 4px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.groups {
+  display: grid;
+  gap: 8px;
+}
+
+.group-card {
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 8px;
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.group-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.logic,
+.remove-group {
+  min-height: 20px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  border-color: transparent;
+  background: transparent;
+}
+
+.logic {
+  color: var(--accent);
+  border-color: rgba(47, 111, 159, 0.24);
+  background: var(--accent-soft);
+}
+
+.remove-group {
+  color: #9a3340;
+}
+
+.group-type {
+  margin-top: 3px;
+  font-weight: 700;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.chip {
+  max-width: 100%;
+  padding: 2px 4px 2px 6px;
+  border: 1px solid #dce5ee;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--text-main);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-remove {
+  width: 12px;
+  height: 12px;
+  min-height: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #7d8792;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.chip-remove:hover {
+  color: #9a3340;
+}
+
+.empty-state,
+.empty-list {
+  padding: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.35;
+}
+
+.preview-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8px 9px 0;
+  padding: 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text-muted);
+}
+
+.preview-box.active {
+  color: var(--text-main);
+  border-color: rgba(47, 111, 159, 0.45);
+  background: var(--accent-soft);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 8px 9px;
+}
+
+.actions button {
+  width: 100%;
+  min-height: 26px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  background: #f3f5f8;
+  color: var(--text-muted);
+  border-color: var(--panel-border);
+}
+
+.saved-title {
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.saved-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 28px;
-  padding: 0 8px;
-  margin-left: 5px;
+  padding: 8px 9px;
+  border-bottom: 1px solid #edf1f5;
   cursor: pointer;
-  font-size: 13px;
-  transition: all 0.15s ease;
-  position: relative;
-  /* 确保文字左对齐 */
-  text-align: left;
-  justify-content: flex-start; /* 水平方向从左开始 */
 }
 
-.tree-row:last-child {
-  border-bottom: none;
+.saved-row:hover,
+.saved-row.active {
+  background: var(--accent-soft);
 }
 
-.tree-row:hover {
-  background: #f5f9ff;
-  transform: translateX(2px);
+.saved-row.active {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
-/* 添加选中状态 */
-.tree-row.active {
-  background: #e9f0fe;
-  border-left: 3px solid #4a90e2;
-}
-
-.tree-row .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  flex-shrink: 0;
-}
-
-.tree-name {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #2c3e50;
-  font-weight: 500;
-  font-size: 15px;
+.saved-meta {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-/* 添加层级线条 */
-.tree-row {
-  position: relative;
+.saved-meta em {
+  color: var(--accent);
+  font-style: normal;
 }
 
-.tree-row::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
+.copy-btn,
+.delete-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 10px;
+  font-weight: 700;
+  border-color: transparent;
   background: transparent;
-  transition: background 0.2s;
 }
 
-.tree-row:hover::after {
-  background: #4a90e2;
+.copy-btn {
+  color: var(--accent);
 }
 
-.toggle {
-  width: 14px;
-  display: inline-block;
-  text-align: center;
-  cursor: pointer;
-  color: #333;
-}
-
-.toggle-placeholder {
-  width: 14px;
-  display: inline-block;
+.delete-btn {
+  color: #9a3340;
 }
 </style>

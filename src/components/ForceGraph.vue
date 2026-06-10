@@ -434,9 +434,11 @@ function renderGraph(data) {
       })
       .on("click",(event,d)=>{
         // 标明我在对哪个子图进行brush
-        brushStore.setActivePanelRegion(props.regionId, "region")
         event.stopPropagation()
         if(!brushStore.activeBrushId) return
+        if (!brushStore.canEditActiveBrushFromRegion(props.regionId)) return
+
+        brushStore.setActivePanelRegion(props.regionId, "region")
 
         brushStore.toggleEdge(
             brushStore.activeBrushId,
@@ -491,6 +493,8 @@ function renderGraph(data) {
       })
       .on("click", (event, d) => {
         event.stopPropagation()
+        if (!brushStore.canEditActiveBrushFromRegion(props.regionId)) return
+
         brushStore.setActivePanelRegion(props.regionId, "region")
         // toggleClass 内部已触发 commit，避免重复提交导致异步返回乱序覆盖高亮
         brushStore.toggleClass(String(d.class))

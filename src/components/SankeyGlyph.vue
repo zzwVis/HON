@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue"
 import * as d3 from "d3"
 import { sankey, sankeyLinkHorizontal } from "d3-sankey";
 import { honvisEntropyFromLinks } from "./tool.js";
+import { apiUrl } from "@/api"
 
 /* ===============================
  * refs
@@ -30,7 +31,7 @@ async function upload() {
   const form = new FormData()
   form.append("file", file.value)
 
-  const res = await fetch("http://localhost:8000/api/upload", {
+  const res = await fetch(apiUrl("/api/upload"), {
     method: "POST",
     body: form
   })
