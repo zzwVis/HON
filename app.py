@@ -133,6 +133,30 @@ def get_filter_index():
         FILTER_INDEX_CACHE = build_filter_index(CURRENT_PAYLOAD)
     return FILTER_INDEX_CACHE
 
+def normalize_logic(value):
+    return "AND" if str(value).upper() == "AND" else "OR"
+
+def combine_seq_sets(seq_sets, logic):
+    seq_sets = [set(s) for s in seq_sets]
+    if not seq_sets:
+        return set()
+
+    if normalize_logic(logic) == "AND":
+        result = seq_sets[0]
+        for s in seq_sets[1:]:
+            result &= s
+        return result
+
+    result = set()
+    for s in seq_sets:
+        result |= s
+    return result
+
+def match_filter_group(values, logic, index_map):
+    if not values:
+        return None
+    return combine_seq_sets((index_map.get(v, set()) for v in values), logic)
+
 def rewrite_highorder(
     input_xlsx,
     state_cluster_csv,
@@ -917,6 +941,7 @@ def filter_sequences_api():
     edges = body.get("edges", []) or []
     classes = [str(x) for x in (body.get("classes", []) or [])]
     states = [normalize_state_key(x) for x in (body.get("states", []) or [])]
+    group_logic = body.get("group_logic") or body.get("groupLogic") or {}
     source_seq_ids = body.get("source_seq_ids", None)
 
     has_edges = len(edges) > 0
@@ -940,20 +965,22 @@ def filter_sequences_api():
     state_to_seq_ids = idx["state_to_seq_ids"]
     seq_highlights = idx["seq_highlights"]
 
-    candidate_seq_ids = set()
+    group_results = []
 
     if has_edges:
-        for edge in edges:
-            for sid in edge_to_seq_ids.get(edge, set()):
-                candidate_seq_ids.add(sid)
-    elif has_classes:
-        for cls in classes:
-            for sid in class_to_seq_ids.get(cls, set()):
-                candidate_seq_ids.add(sid)
-    elif has_states:
-        for st in states:
-            for sid in state_to_seq_ids.get(st, set()):
-                candidate_seq_ids.add(sid)
+        group_results.append(
+            match_filter_group(edges, group_logic.get("edges", "AND"), edge_to_seq_ids)
+        )
+    if has_classes:
+        group_results.append(
+            match_filter_group(classes, group_logic.get("classes", "AND"), class_to_seq_ids)
+        )
+    if has_states:
+        group_results.append(
+            match_filter_group(states, group_logic.get("states", "AND"), state_to_seq_ids)
+        )
+
+    candidate_seq_ids = combine_seq_sets(group_results, "AND")
 
     if source_seq_ids is not None:
         source_set = set(int(x) for x in source_seq_ids)
