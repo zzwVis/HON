@@ -17,6 +17,13 @@ export const usePayloadStore = defineStore("payload", () => {
 
     const selectedStates = ref(new Set())
     const selectedClasses = ref(new Set())
+    const selectedFirstOrderState = ref(null)
+    const selectedHighOrderClass = ref(null)
+    const selectedFirstOrderRegionId = ref(null)
+    const selectedHighOrderRegionId = ref(null)
+    const hoveredAppendEvent = ref(null)
+    const focusedAppendEvent = ref(null)
+    const hoveredHighOrderClasses = ref([])
 
     const mode = ref("contiguous")
 
@@ -31,6 +38,7 @@ export const usePayloadStore = defineStore("payload", () => {
     // key: String(node.id) -> { x, y }
     const globalGraphNodePositions = ref(null)
     const globalGraphLayoutBounds = ref(null)
+    const highOrderLayoutMode = ref("force")
 
     /* ======================
      * helpers
@@ -74,6 +82,78 @@ export const usePayloadStore = defineStore("payload", () => {
         selectedStates.value = new Set()
     }
 
+    function setFirstOrderState(state, regionId = "global") {
+        selectedFirstOrderState.value = state == null ? null : String(state)
+        selectedFirstOrderRegionId.value = selectedFirstOrderState.value ? String(regionId || "global") : null
+        if (selectedFirstOrderState.value) {
+            selectedHighOrderClass.value = null
+            selectedHighOrderRegionId.value = null
+        }
+    }
+
+    function toggleFirstOrderState(state, regionId = "global") {
+        const next = state == null ? null : String(state)
+        const nextRegionId = String(regionId || "global")
+        const isSame =
+            selectedFirstOrderState.value === next &&
+            selectedFirstOrderRegionId.value === nextRegionId
+        selectedFirstOrderState.value = isSame ? null : next
+        selectedFirstOrderRegionId.value = selectedFirstOrderState.value ? nextRegionId : null
+        if (selectedFirstOrderState.value) {
+            selectedHighOrderClass.value = null
+            selectedHighOrderRegionId.value = null
+        }
+    }
+
+    function setHighOrderClass(cls, regionId = "global") {
+        selectedHighOrderClass.value = cls == null ? null : String(cls)
+        selectedHighOrderRegionId.value = selectedHighOrderClass.value ? String(regionId || "global") : null
+        if (selectedHighOrderClass.value) {
+            selectedFirstOrderState.value = null
+            selectedFirstOrderRegionId.value = null
+        }
+    }
+
+    function toggleHighOrderClass(cls, regionId = "global") {
+        const next = cls == null ? null : String(cls)
+        const nextRegionId = String(regionId || "global")
+        const isSame =
+            selectedHighOrderClass.value === next &&
+            selectedHighOrderRegionId.value === nextRegionId
+        selectedHighOrderClass.value = isSame ? null : next
+        selectedHighOrderRegionId.value = selectedHighOrderClass.value ? nextRegionId : null
+        if (selectedHighOrderClass.value) {
+            selectedFirstOrderState.value = null
+            selectedFirstOrderRegionId.value = null
+        }
+    }
+
+    function clearSelectionForRegion(regionId) {
+        const rid = String(regionId || "global")
+        if (selectedFirstOrderRegionId.value === rid) {
+            selectedFirstOrderState.value = null
+            selectedFirstOrderRegionId.value = null
+        }
+        if (selectedHighOrderRegionId.value === rid) {
+            selectedHighOrderClass.value = null
+            selectedHighOrderRegionId.value = null
+        }
+    }
+
+    function setHoveredAppendEvent(eventName) {
+        hoveredAppendEvent.value = eventName == null ? null : String(eventName)
+    }
+
+    function setFocusedAppendEvent(eventName) {
+        focusedAppendEvent.value = eventName == null ? null : String(eventName)
+    }
+
+    function setHoveredHighOrderClasses(classIds) {
+        hoveredHighOrderClasses.value = Array.isArray(classIds)
+            ? classIds.filter(v => v != null).map(v => String(v))
+            : []
+    }
+
     function setStates(keys) {
         const s = new Set(selectedStates.value)
         keys.forEach(k => s.add(k))
@@ -111,6 +191,10 @@ export const usePayloadStore = defineStore("payload", () => {
         payload.value = null
         originalPayload.value = null
         selectedStates.value = new Set()
+        selectedFirstOrderState.value = null
+        selectedFirstOrderRegionId.value = null
+        selectedHighOrderClass.value = null
+        selectedHighOrderRegionId.value = null
 
         prevSteps.value = null
         nextSteps.value = null
@@ -188,6 +272,10 @@ export const usePayloadStore = defineStore("payload", () => {
         }
     }
 
+    function setHighOrderLayoutMode(mode) {
+        highOrderLayoutMode.value = (mode === "layered" || mode === "sequence") ? "layered" : "force"
+    }
+
     /* ======================
      * filtered payload
      * ====================== */
@@ -237,6 +325,13 @@ export const usePayloadStore = defineStore("payload", () => {
 
         selectedStates,
         selectedClasses,
+        selectedFirstOrderState,
+        selectedHighOrderClass,
+        selectedFirstOrderRegionId,
+        selectedHighOrderRegionId,
+        hoveredAppendEvent,
+        focusedAppendEvent,
+        hoveredHighOrderClasses,
 
         mode,
 
@@ -248,6 +343,14 @@ export const usePayloadStore = defineStore("payload", () => {
         toggleState,
         clearStates,
         setStates,
+        setFirstOrderState,
+        toggleFirstOrderState,
+        setHighOrderClass,
+        toggleHighOrderClass,
+        clearSelectionForRegion,
+        setHoveredAppendEvent,
+        setFocusedAppendEvent,
+        setHoveredHighOrderClasses,
 
         toggleClass,
 
@@ -263,8 +366,10 @@ export const usePayloadStore = defineStore("payload", () => {
 
         globalGraphNodePositions,
         globalGraphLayoutBounds,
+        highOrderLayoutMode,
         setGlobalGraphNodePositions,
         updateGlobalGraphNodePosition,
+        setHighOrderLayoutMode,
     }
 
 })

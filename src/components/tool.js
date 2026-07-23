@@ -1,4 +1,5 @@
 import * as d3 from "d3"
+import dagre from "dagre"
 
 // ===============================
 // HoNVis-style normalized entropy
@@ -34,6 +35,60 @@ export function computeLayerMap(eventSeqs) {
         layer.set(String(c), s / cnt.get(c))
     }
     return layer
+}
+
+export function applyLayeredLayout(nodes, links, options = {}) {
+    if (!Array.isArray(nodes) || nodes.length === 0) return
+
+    const nodeW = options.nodeW ?? 72
+    const nodeH = options.nodeH ?? 28
+    const ranksep = options.ranksep ?? 18
+    const nodesep = options.nodesep ?? Math.max(14, nodeH * 0.8)
+
+    const g = new dagre.graphlib.Graph({
+        directed: true,
+        multigraph: true,
+    })
+    g.setGraph({
+        rankdir: "LR",
+        ranksep,
+        nodesep,
+        marginx: 0,
+        marginy: 0,
+        acyclicer: "greedy",
+        ranker: "network-simplex",
+    })
+    g.setDefaultEdgeLabel(() => ({}))
+
+    nodes.forEach(node => {
+        g.setNode(String(node.id), {
+            width: nodeW,
+            height: nodeH,
+        })
+    })
+
+    let edgeIndex = 0
+    ;(links || []).forEach(link => {
+        const source = typeof link.source === "object" ? link.source.id : link.source
+        const target = typeof link.target === "object" ? link.target.id : link.target
+        const sid = String(source)
+        const tid = String(target)
+        if (!sid || !tid || sid === tid) return
+        if (!g.hasNode(sid) || !g.hasNode(tid)) return
+        g.setEdge(sid, tid, {
+            weight: Math.max(1, Number(link.value ?? 1)),
+        }, `e${edgeIndex++}`)
+    })
+
+    dagre.layout(g)
+
+    nodes.forEach(node => {
+        const p = g.node(String(node.id))
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+            node.x = p.x
+            node.y = p.y
+        }
+    })
 }
 
 export function taperedLinkPath(d, w0 = 8, w1 = 1) {

@@ -162,12 +162,27 @@ const conditionGroups = computed(() => {
     })
   }
 
-  if (b.states?.size) {
+  const stateValues = Array.from(b.states || []).filter(state => !String(state).includes("→"))
+  const stateTransitionValues = Array.from(b.states || []).filter(state => String(state).includes("→"))
+
+  if (stateValues.length) {
     groups.push({
       key: "states",
-      type: "First-order State / Transition",
+      type: "First-order State",
       logic: b.groupLogic?.states || "AND",
-      values: Array.from(b.states).map(state => ({
+      values: stateValues.map(state => ({
+        value: String(state),
+        label: String(state)
+      }))
+    })
+  }
+
+  if (stateTransitionValues.length) {
+    groups.push({
+      key: "stateTransitions",
+      type: "First-order Transition",
+      logic: b.groupLogic?.stateTransitions || "AND",
+      values: stateTransitionValues.map(state => ({
         value: String(state),
         label: String(state)
       }))
@@ -183,13 +198,17 @@ const canApply = computed(() =>
     activeFilter.value &&
     conditionGroups.value.length > 0 &&
     preview.value?.brushId === activeFilter.value.id &&
-    preview.value?.count != null
+    Number(preview.value?.count || 0) > 0
   )
 )
 
 function startBlankFilter() {
   brushStore.setActivePanelRegion("global", "global")
   brushStore.createBrush()
+}
+
+function setInteractionMode(mode) {
+  brushStore.setInteractionMode(mode)
 }
 
 function cleanToken(token) {
@@ -219,6 +238,8 @@ function togglePreset(value) {
       brushStore.removeGroupValue("classes", value)
     } else if (conditionType.value === "HO_EDGE") {
       brushStore.removeGroupValue("edges", value)
+    } else if (conditionType.value === "STATE_TRANSITION") {
+      brushStore.removeGroupValue("stateTransitions", value)
     } else {
       brushStore.removeGroupValue("states", value)
     }
@@ -283,8 +304,8 @@ function regionLabelForFilter(filterId) {
 
 function applyFilter() {
   if (!canApply.value) return
-  const filter = brushStore.useEquivalentSavedBrushIfAny()
-  const filterId = filter?.id || brushStore.activeBrushId
+  const filterId = brushStore.saveActiveBrush()
+  if (!filterId) return
   const existingRid = regionIdForFilter(filterId)
   const targetRid = existingRid || regionStore.fork()
   if (!targetRid) return
@@ -293,6 +314,9 @@ function applyFilter() {
   if (regionStore.activeRegionId !== targetRid) {
     regionStore.setActive(targetRid)
   }
+  brushStore.setActiveBrush(filterId)
+  brushStore.setInteractionMode("inspect")
+  brushStore.clearPreview()
 }
 
 function applyPreviewToRegion(targetRid, filterId = brushStore.activeBrushId) {
@@ -302,14 +326,7 @@ function applyPreviewToRegion(targetRid, filterId = brushStore.activeBrushId) {
 
   const sourceRid = preview.value?.sourceRid
   if (sourceRid) regionStore.setHighlightData(sourceRid, null, null)
-}
-
-function saveAsFilter() {
-  if (!activeFilter.value) {
-    startBlankFilter()
-    return
-  }
-  brushStore.saveActiveBrush()
+  brushStore.clearPreview()
 }
 
 function clearDraft() {
@@ -320,15 +337,16 @@ function clearDraft() {
   if (!activeId || !active) return
 
   if (active.saved) {
-    brushStore.setActiveBrush(activeId)
+    regionStore.removeRegionsByBrush(activeId)
+    brushStore.removeBrush(activeId)
   } else {
     brushStore.removeBrush(activeId)
   }
 }
 
 function removeFilter(id) {
+  regionStore.removeRegionsByBrush(id)
   brushStore.removeBrush(id)
-  regionStore.clearBrush(id)
 }
 </script>
 
@@ -339,7 +357,22 @@ function removeFilter(id) {
         <div>
           <div class="eyebrow">Filter Definition</div>
         </div>
-        <button class="icon-btn" title="Start a blank filter" @click="startBlankFilter">+</button>
+        <div class="mode-toggle" title="Choose whether graph clicks inspect nodes or select filter conditions">
+          <button
+            :class="{ active: brushStore.interactionMode === 'inspect' }"
+            title="Inspect mode"
+            @click="setInteractionMode('inspect')"
+          >
+            View
+          </button>
+          <button
+            :class="{ active: brushStore.interactionMode === 'brush' }"
+            title="Select mode"
+            @click="setInteractionMode('brush')"
+          >
+            Select
+          </button>
+        </div>
       </div>
 
       <div class="draft-card" :class="{ empty: !activeFilter }">
@@ -440,7 +473,7 @@ function removeFilter(id) {
                   :key="item.value"
                   class="chip"
                 >
-                  <span>{{ item.label }}</span>
+                  <span :title="item.label">{{ item.label }}</span>
                   <button
                     class="chip-remove"
                     title="Remove condition"
@@ -456,26 +489,25 @@ function removeFilter(id) {
 
         <template v-else>
           <div class="empty-state">
-            <p>Use the + button above to create a new filter.</p>
+            <p>Switch to Select mode to create a new filter.</p>
           </div>
         </template>
       </div>
 
-      <div class="preview-box" :class="{ active: preview?.count > 0 }">
-        <span>Preview</span>
-        <strong>{{ preview?.count || 0 }} seqs</strong>
-      </div>
+      <div class="preview-actions">
+        <div class="preview-box" :class="{ active: preview?.count > 0 }">
+          <span>Preview</span>
+          <strong>{{ preview?.count || 0 }} seqs</strong>
+        </div>
 
-      <div class="actions">
-        <button :disabled="!canApply" @click="applyFilter">
-          Apply
-        </button>
-        <button :disabled="!canPreview" @click="saveAsFilter">
-          Save
-        </button>
-        <button :disabled="!canPreview" @click="clearDraft">
-          Clear
-        </button>
+        <div class="actions">
+          <button :disabled="!canApply" @click="applyFilter">
+            Apply
+          </button>
+          <button :disabled="!canPreview" @click="clearDraft">
+            Clear
+          </button>
+        </div>
       </div>
     </section>
 
@@ -573,6 +605,32 @@ function removeFilter(id) {
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  background: #fff;
+  gap: 1px;
+}
+
+.mode-toggle button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.mode-toggle button.active {
+  background: var(--accent);
+  color: #fff;
 }
 
 .draft-card {
@@ -814,14 +872,16 @@ function removeFilter(id) {
 }
 
 .chips {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   margin-top: 7px;
+  min-width: 0;
 }
 
 .chip {
   max-width: 100%;
+  min-width: 0;
   padding: 2px 4px 2px 6px;
   border: 1px solid #dce5ee;
   border-radius: 999px;
@@ -831,10 +891,17 @@ function removeFilter(id) {
   align-items: center;
   gap: 2px;
   overflow: hidden;
+}
+
+.chip > span {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chip-remove {
+  flex: 0 0 auto;
   width: 12px;
   height: 12px;
   min-height: 12px;
@@ -858,16 +925,26 @@ function removeFilter(id) {
   line-height: 1.35;
 }
 
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 9px 8px;
+}
+
 .preview-box {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 8px 9px 0;
-  padding: 8px;
+  min-height: 28px;
+  padding: 5px 7px;
   border: 1px solid var(--panel-border);
   border-radius: 6px;
   background: var(--panel-soft);
   color: var(--text-muted);
+  font-size: 10px;
 }
 
 .preview-box.active {
@@ -877,18 +954,19 @@ function removeFilter(id) {
 }
 
 .actions {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  padding: 8px 9px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
 }
 
 .actions button {
-  width: 100%;
-  min-height: 26px;
+  min-width: 46px;
+  min-height: 28px;
+  padding: 4px 8px;
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 

@@ -2,7 +2,13 @@
 import {ref, watch, computed } from "vue"
 import { Upload } from "@element-plus/icons-vue"
 import * as d3 from "d3"
-import { computeLayerMap, selfLoopTaperedPath, curvedTaperedLinkPath, entropyFromLinks } from "./tool.js";
+import {
+  applyLayeredLayout,
+  computeLayerMap,
+  selfLoopTaperedPath,
+  curvedTaperedLinkPath,
+  entropyFromLinks
+} from "./tool.js";
 import { usePayloadStore } from "@/store/payloadStore.js"
 import { useBrushStore } from "@/store/brushStore.js"
 import { drawGlyphForce } from "./drawGlyphForce.js"
@@ -19,7 +25,6 @@ import sliceIcon from "../assets/slice.svg"
 const svgRef = ref(null)
 const nodeSelRef = ref(null)
 const linkSelRef = ref(null) // 可选
-const legendRef = ref(null)
 const file = ref(null)
 const payload = ref(null)
 const tooltipRef = ref(null)
@@ -47,6 +52,30 @@ watch(
     { deep: true }
 )
 
+watch(
+    () => [
+	      payloadStore.selectedHighOrderClass,
+	      payloadStore.selectedHighOrderRegionId,
+	      payloadStore.selectedFirstOrderState,
+	      payloadStore.selectedFirstOrderRegionId,
+	      payloadStore.hoveredAppendEvent,
+      payloadStore.focusedAppendEvent,
+      payloadStore.hoveredHighOrderClasses
+    ],
+    () => {
+      updateHighlightStylesFn.value?.()
+    }
+)
+
+watch(
+    () => payloadStore.highOrderLayoutMode,
+    () => {
+      const data = payloadStore.payload || payload.value
+      if (!data) return
+      render(data)
+    }
+)
+
 // let rafPending = false
 //
 // watch(
@@ -68,6 +97,44 @@ watch(
 
 function edgeKey(d) {
   return `${d.source.id}→${d.target.id}`
+}
+
+function normalizeToken(x) {
+  return String(x ?? "").trim().replace(/^['"]|['"]$/g, "").replace(/[']/g, "")
+}
+
+function getDisplayToken(token, legend) {
+  const raw = String(token ?? "").trim()
+  const tokenList = Array.isArray(legend?.tokens) ? legend.tokens : []
+  const hit = tokenList.find(t => normalizeToken(t) === normalizeToken(raw))
+  return hit || raw
+}
+
+function buildSemanticEdgeMap(classSeqs, firstSeqs) {
+  const map = new Map()
+  ;(classSeqs || []).forEach((classSeq, sid) => {
+    const firstSeq = firstSeqs?.[sid] || []
+    if (!Array.isArray(classSeq)) return
+    for (let i = 0; i < classSeq.length - 1; i++) {
+      const source = `node${classSeq[i]}`
+      const target = `node${classSeq[i + 1]}`
+      const key = `${source}→${target}`
+      const appendEvent = normalizeToken(firstSeq[i + 1] ?? "")
+      if (!appendEvent) continue
+      if (!map.has(key)) map.set(key, { total: 0, events: new Map() })
+      const entry = map.get(key)
+      entry.total += 1
+      entry.events.set(appendEvent, (entry.events.get(appendEvent) || 0) + 1)
+    }
+  })
+  return map
+}
+
+function hasVisibleHighOrderStates(glyph, cls) {
+  const g = glyph?.[String(cls)]
+  if (!g) return false
+  if (Array.isArray(g.full_order_states)) return g.full_order_states.length > 0
+  return (g.unique_states || []).length > 0
 }
 
 // ------------------------
@@ -153,55 +220,12 @@ function render(data) {
   renderGraph(data)
 }
 
-/* ===============================
- * legend
- * =============================== */
-function renderLegend(el, tokens, color) {
-  const root = d3.select(el)
-  root.selectAll("*").remove()
-
-  // 修改这里：允许换行
-  root.style("display", "flex")
-      .style("align-items", "center")
-      .style("flex-wrap", "wrap")      // 从 nowrap 改为 wrap
-      .style("gap", "8px 12px")        // 添加间距，让图例项之间有空隙
-      .style("max-width", "100%")       // 确保不超过容器宽度
-      .style("overflow", "visible")      // 确保内容不被截断
-
-  // root.append("span")
-  //     .style("font-weight", "600")
-  //     .style("margin-bottom", "8px")
-  //     .text("first_order_node")
-  //     .style("margin-right", "12px") // 距离右侧图标的间距
-  //     .style("white-space", "nowrap")
-
-  const item = root.selectAll(".legend-item")
-      .data(tokens)
-      .enter()
-      .append("div")
-      .attr("class", "legend-item")
-      .style("display", "inline-flex")   // 确保每个图例项内联显示
-      .style("align-items", "center")
-      .style("white-space", "nowrap")     // 图例项内部文字不换行
-
-
-  item.append("div")
-      .attr("class", "swatch")
-      .style("width", "12px")
-      .style("height", "12px")
-      // .style("border", "1px solid #999")
-      .style("background-color", d => color(d))
-      .style("margin-right", "2px")       // 色块和文字之间的间距
-
-  item.append("div").text(d => d)
-}
-
 function showTooltip(html, event) {
   const el = d3.select(tooltipRef.value)
 
   el.html(html)
-      .style("left", event.offsetX + 12 + "px")
-      .style("top", event.offsetY + 12 + "px")
+      .style("left", event.clientX + 12 + "px")
+      .style("top", event.clientY + 12 + "px")
       .style("opacity", 1)
 }
 
@@ -290,7 +314,6 @@ function renderGraph(data) {
   // renderLegend(legendRef.value, tokens, color)
   payloadStore.buildGlobalColorScale(tokens)
   const color = payloadStore.colorScale
-  renderLegend(legendRef.value, tokens, color)
 
   const rect = svgRef.value.getBoundingClientRect();
   const width = rect.width
@@ -310,14 +333,49 @@ function renderGraph(data) {
   svg.call(zoom.transform, d3.zoomIdentity)
 
   // 复制数据（d3-force 会改对象）
-  const nodes = graph.nodes.map(d => ({ ...d }))
-  const links = graph.links.map(d => ({ ...d }))
+  const nodes = graph.nodes
+      .filter(d => hasVisibleHighOrderStates(glyph, d.class))
+      .map(d => ({ ...d }))
+  const visibleNodeIds = new Set(nodes.map(d => String(d.id)))
+  if (nodes.length === 0) {
+    svg.append("text")
+        .attr("x", width / 2)
+        .attr("y", height / 2)
+        .attr("text-anchor", "middle")
+        .attr("dominant-baseline", "middle")
+        .attr("fill", "var(--text-muted)")
+        .style("font-size", "12px")
+        .text("No full-order high-order states in this view.")
+    return
+  }
+  const links = graph.links
+      .filter(l => {
+        const sid = typeof l.source === "object" ? l.source.id : l.source
+        const tid = typeof l.target === "object" ? l.target.id : l.target
+        return visibleNodeIds.has(String(sid)) && visibleNodeIds.has(String(tid))
+      })
+      .map(d => ({ ...d }))
 
   // ⭐ 预计算 edge key
   links.forEach(l => {
     const sid = typeof l.source === "object" ? l.source.id : l.source
     const tid = typeof l.target === "object" ? l.target.id : l.target
     l._key = `${sid}→${tid}`
+  })
+
+  const semanticEdgeMap = buildSemanticEdgeMap(data.raw_sequences, data.first_order_sequences)
+  links.forEach(l => {
+    const entry = semanticEdgeMap.get(l._key)
+    const events = Array.from(entry?.events?.entries?.() || [])
+        .map(([eventName, support]) => ({
+          eventName,
+          label: getDisplayToken(eventName, legend),
+          support,
+          probability: entry?.total ? support / entry.total : 0
+        }))
+        .sort((a, b) => b.support - a.support || a.label.localeCompare(b.label))
+    l.appendEvents = events
+    l.primaryAppendEvent = events[0]?.eventName ?? null
   })
 
   // ===============================
@@ -356,9 +414,8 @@ function renderGraph(data) {
   const entropies = nodes.map(d => d.entropy)
   const maxEntropy = d3.max(entropies) || 1
 
-  const entropyColor = d3.scaleLinear()
+  const entropyColor = d3.scaleSequential(d3.interpolateYlOrRd)
       .domain([0, maxEntropy])
-      .range(["#2166ac", "#f7f7f7"])
 
   const values = links.map(d => d.value)
 
@@ -474,7 +531,7 @@ function renderGraph(data) {
         d3.select(this).style("cursor", "pointer")
 
         showTooltip(
-            `${d.source.class} → ${d.target.class}<br/>value: ${d.value}`, event)
+            `${d.source.class} → ${d.target.class}<br/>Next event: ${d.appendEvents?.[0]?.label ?? "n/a"}<br/>support: ${d.value}<br/>probability: ${d.appendEvents?.[0]?.probability != null ? (d.appendEvents[0].probability * 100).toFixed(2) + "%" : "n/a"}`, event)
       })
       .on("mouseleave", function() {
         hideTooltip()
@@ -482,14 +539,15 @@ function renderGraph(data) {
       .on("click", (event, d) => {
         event.stopPropagation()
         // 说明我现在在对全量图进行brush
-        if (!brushStore.canEditActiveBrushFromRegion("global")) return
+        if (brushStore.interactionMode !== "brush") return
 
         brushStore.setActivePanelRegion(
             "global",
             "global"
         )
 
-        if (!brushStore.activeBrushId) return
+        if (!brushStore.activeBrushId) brushStore.createBrush()
+        if (!brushStore.canEditActiveBrushFromRegion("global")) return
 
         const key = edgeKey(d)
 
@@ -559,18 +617,13 @@ function renderGraph(data) {
       .on("click", (event, d) => {
 
         event.stopPropagation()
-        if (!brushStore.canEditActiveBrushFromRegion("global")) return
-
-        brushStore.setActivePanelRegion(
-            "global",
-            "global"
-        )
-
-        // brushStore.setActivePanelRegion(
-        //     currentSourceRegion.value.id,
-        //     currentSourceRegion.value.type
-        // )
-        brushStore.toggleClass(String(d.class))
+	        payloadStore.toggleHighOrderClass(String(d.class), "global")
+        if (brushStore.interactionMode === "brush") {
+          brushStore.setActivePanelRegion("global", "global")
+          if (!brushStore.activeBrushId) brushStore.createBrush()
+          if (!brushStore.canEditActiveBrushFromRegion("global")) return
+          brushStore.addClass(String(d.class))
+        }
       })
 
 
@@ -584,8 +637,8 @@ function renderGraph(data) {
       .attr("height", NODE_H)
       .attr("rx", 6)
       .attr("fill", "#f5f5f5")
-      .attr("stroke", "#aaa")
-      .attr("stroke-width", 1)
+      .attr("stroke", d => entropyColor(d.entropy))
+      .attr("stroke-width", d => 0.9 + d.entropy * 1.4)
 
   // 建索引：nodeId -> rect DOM 元素（高亮更新用）
   const nodeRectElById = new Map()
@@ -638,14 +691,23 @@ function renderGraph(data) {
     return typeof x === "object" ? x.id : x
   }
 
-  /* ===============================
-  * ForceAtlas2 布局（Gephi style）
-  * =============================== */
-  const g = new Graph({
-    multi: true,
-    type: "directed",
-    allowSelfLoops: true
-  })
+  const useLayeredLayout = payloadStore.highOrderLayoutMode === "layered"
+  if (useLayeredLayout) {
+    applyLayeredLayout(nodes, links, {
+      nodeW: NODE_W * 0.62,
+      nodeH: NODE_H,
+      ranksep: 18,
+      nodesep: 14,
+    })
+  } else {
+    /* ===============================
+    * ForceAtlas2 布局（Gephi style）
+    * =============================== */
+    const g = new Graph({
+      multi: true,
+      type: "directed",
+      allowSelfLoops: true
+    })
 
   const xNorm = d3.scaleLinear()
       .domain([0, maxLayer])
@@ -738,10 +800,11 @@ function renderGraph(data) {
   /* -------------------------------
    * 写回坐标
    * ------------------------------- */
-  nodes.forEach(n => {
-    n.x = g.getNodeAttribute(n.id, "x")
-    n.y = g.getNodeAttribute(n.id, "y")
-  })
+    nodes.forEach(n => {
+      n.x = g.getNodeAttribute(n.id, "x")
+      n.y = g.getNodeAttribute(n.id, "y")
+    })
+  }
 
   /* -------------------------------
   * Gephi风格 scale（支持矩形容器）
@@ -771,7 +834,7 @@ function renderGraph(data) {
   const layoutW = (maxX - minX) || 1
   const layoutH = (maxY - minY) || 1
 
-  const scale = 1
+  const scale = useLayeredLayout ? 0.52 : 1
 
   nodes.forEach(n => {
 
@@ -1112,6 +1175,18 @@ function renderGraph(data) {
     const getAfter = (k) => edgeCountAfter.get(k) || 0
     const getDiff = (k) => getAfter(k) - getBefore(k)
     const getAbsDiff = (k) => Math.abs(getDiff(k))
+    const activeAppendEvent = payloadStore.hoveredAppendEvent || payloadStore.focusedAppendEvent
+    const hoveredHighOrderClasses = new Set(payloadStore.hoveredHighOrderClasses || [])
+
+    const edgeHasAppendEvent = (d, eventName) => {
+      if (!eventName) return false
+      return (d.appendEvents || []).some(evt => normalizeToken(evt.eventName) === normalizeToken(eventName))
+    }
+
+    const edgeMatchesContextMap = (d) => {
+      if (activeAppendEvent) return edgeHasAppendEvent(d, activeAppendEvent)
+      return false
+    }
 
     const pickHighlightColor = (k, fallback) => {
       let baseColor = null
@@ -1145,20 +1220,38 @@ function renderGraph(data) {
 
     nodeSel.select("rect")
         .attr("stroke", d => {
-          if (!active) return "#aaa"
-          if (!highlightNodes) return "#aaa"
+          if (hoveredHighOrderClasses.size > 0) {
+            return hoveredHighOrderClasses.has(String(d.class)) ? "#111827" : "#aaa"
+          }
+          if (!active) return entropyColor(d.entropy)
+          if (!highlightNodes) return entropyColor(d.entropy)
           const hit = highlightNodes.has(d.id)
-          return hit ? active.color : "#aaa"
+          return hit ? active.color : entropyColor(d.entropy)
         })
         .attr("stroke-width", d => {
-          if (!active) return 1
-          return highlightNodes.has(d.id) ? 1.5 : 1
+          if (hoveredHighOrderClasses.size > 0) {
+            return hoveredHighOrderClasses.has(String(d.class)) ? 2 : 1
+          }
+          if (!active) return 0.9 + d.entropy * 1.4
+          return highlightNodes.has(d.id) ? 1.5 : 0.9 + d.entropy * 1.4
+        })
+        .attr("opacity", d => {
+          if (hoveredHighOrderClasses.size > 0) {
+            return hoveredHighOrderClasses.has(String(d.class)) ? 1 : 0.22
+          }
+          return 1
         })
 
     // 边
     linkSel
         .attr("opacity", d => {
           const k = edgeKey(d)
+          if (activeAppendEvent) {
+            return edgeMatchesContextMap(d) ? 1 : 0.04
+          }
+          if (hoveredHighOrderClasses.size > 0) {
+            return linkOpacity(d.value)
+          }
           // highlight 优先
           if (hasEdgeHighlight) {
             if (!highlightEdges.has(k)) return 0.01
@@ -1182,6 +1275,10 @@ function renderGraph(data) {
         .attr("fill", d => {
           const sid = d.source
           const tid = d.target
+          if (activeAppendEvent && edgeMatchesContextMap(d)) {
+            const evt = activeAppendEvent || d.primaryAppendEvent
+            return sid !== tid ? (evt ? color(getDisplayToken(evt, legend)) : linkGray(d.value)) : "none"
+          }
           if (!hasEdgeHighlight) return sid !== tid ? linkGray(d.value) : "none"
           const k = edgeKey(d)
           if (highlightEdges.has(k)) {
@@ -1192,6 +1289,10 @@ function renderGraph(data) {
         .attr("stroke", d => {
           const sid = d.source
           const tid = d.target
+          if (activeAppendEvent && edgeMatchesContextMap(d)) {
+            const evt = activeAppendEvent || d.primaryAppendEvent
+            return sid === tid ? (evt ? color(getDisplayToken(evt, legend)) : linkGray(d.value)) : "none"
+          }
           if (!hasEdgeHighlight) return sid === tid ? linkGray(d.value) : "none"
           const k = edgeKey(d)
           if (highlightEdges.has(k)) {
@@ -1260,16 +1361,28 @@ function renderGraph(data) {
   </div>
 
   <div class="graph-container">
-    <div class="legend-row"
+    <div class="graph-header"
          @click="regionStore.setActive('global')">
       <div class="control">
-        <input ref="fileInput" type="file" accept=".csv" class="hidden-file-input" @change="onFileChange" />
-        <el-icon :size="10" @click="triggerUpload" class="upload-btn"><Upload /></el-icon>
-        <span class="global-title">Global</span>
-      </div>
-      <div ref="legendRef" class="legend"></div>
-
-    </div>
+	        <input ref="fileInput" type="file" accept=".csv" class="hidden-file-input" @change="onFileChange" />
+	        <el-icon :size="10" @click="triggerUpload" class="upload-btn"><Upload /></el-icon>
+	        <span class="global-title">HIGHER-ORDER NETWORK</span>
+	        <div class="layout-toggle" title="Switch graph layout" @click.stop>
+	          <button
+	              :class="{ active: payloadStore.highOrderLayoutMode === 'force' }"
+	              @click="payloadStore.setHighOrderLayoutMode('force')"
+	          >
+	            Force
+	          </button>
+	          <button
+	              :class="{ active: payloadStore.highOrderLayoutMode === 'layered' }"
+	              @click="payloadStore.setHighOrderLayoutMode('layered')"
+	          >
+	            Layered
+	          </button>
+	        </div>
+	      </div>
+	    </div>
 
     <div class="sankey-content">
       <!-- 只有一个.svg-section，内部包含图例和SVG -->
@@ -1318,42 +1431,6 @@ function renderGraph(data) {
   /*overflow: auto; 添加滚动条查看完整SVG */
 }
 
-.legend {
-  font-size: 11px;
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  padding: 7px 9px;
-  gap: 8px 12px;
-  min-height: 32px;
-  color: var(--text-muted);
-}
-
-.legend-item {
-  display: inline-flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-}
-
-.legend-item > div:last-child {
-  order: 1;
-}
-
-.legend-item > .swatch {
-  order: 2;
-}
-
-.swatch {
-  width: 12px;
-  height: 12px;
-  border: 1px solid rgba(36, 49, 66, 0.32);
-  box-sizing: border-box;
-  display: inline-block;
-  vertical-align: middle;
-}
-
 .node rect {
   cursor: default;
 }
@@ -1363,7 +1440,7 @@ function renderGraph(data) {
 }
 
 .tooltip {
-  position: absolute;
+  position: fixed;
   pointer-events: none;
   background: rgba(255, 255, 255, 0.96);
   color: var(--text-main);
@@ -1377,7 +1454,7 @@ function renderGraph(data) {
   transition: opacity 0.15s ease;
   white-space: nowrap;
   text-align: left;
-  z-index: 1000;
+  z-index: 100000;
 }
 
 .svg-section svg {
@@ -1405,31 +1482,60 @@ function renderGraph(data) {
   background-color: var(--accent-soft);
 }
 
-.legend-row {
+.graph-header {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 12px;
   width: 100%;
-  flex-wrap: nowrap;
   background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
+}
+
+.graph-header {
+  justify-content: flex-start;
   border-bottom: 1px solid var(--panel-border);
+  padding: 6px 8px 4px;
 }
 
 .control {
-  width: 44px;
-  flex: 0 0 44px;
-  display: grid;
-  justify-items: center;
-  align-content: center;
-  gap: 2px;
-  padding: 3px 0 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
 }
 
 .global-title {
   color: var(--text-main);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 1;
+}
+
+.layout-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
+  padding: 1px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  background: #fff;
+}
+
+.layout-toggle button {
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+}
+
+.layout-toggle button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
 }
 
 /* 文件上传样式 */

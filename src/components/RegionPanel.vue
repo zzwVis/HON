@@ -1,6 +1,6 @@
 <!-- RegionPanel.vue -->
 <script setup>
-import { computed, watchEffect, onMounted } from "vue"
+import { computed, ref, watchEffect, onMounted, nextTick } from "vue"
 import { useBrushStore } from "@/store/brushStore.js"
 import { usePayloadStore } from "@/store/payloadStore.js"
 import { useRegionStore } from "@/store/regionStore.js"
@@ -8,7 +8,7 @@ import ForceGraph from "./ForceGraph.vue"
 import {
   buildHighOrderStatesFromFirstOrder,
   buildStateKeyToClassMap,
-  stateTokensToClass
+  canonicalJsonKey,
 } from "@/components/tool.js"
 
 
@@ -20,6 +20,10 @@ const props = defineProps({
 const brushStore = useBrushStore()
 const payloadStore = usePayloadStore()
 const regionStore = useRegionStore()
+const showModelDialog = ref(false)
+const modelDialogX = ref(0)
+const modelDialogY = ref(0)
+const modelInputNumber = ref(null)
 
 /* region + brush (局部依赖) */
 const region = computed(() => regionStore.regions[props.regionId])
@@ -43,8 +47,121 @@ const regionSubtitle = computed(() => {
   if (r?.sourceRegionId) {
     parts.push(`from ${r.sourceRegionId === "global" ? "Global" : `Region ${r.sourceRegionId}`}`)
   }
+  if (r?.modelStatus === "ready") {
+    const count = r.modelInfo?.num_clusters
+    parts.push(count ? `local model · ${count} nodes` : "local model")
+  } else if (r?.modelStatus === "running") {
+    parts.push("re-aggregating")
+  } else if (r?.modelStatus === "error") {
+    parts.push("model failed")
+  }
   return parts.join(" · ")
 })
+
+const isOverlayBase = computed(() =>
+    regionStore.overlay?.baseRegionId === props.regionId
+)
+
+const isOverlayTarget = computed(() =>
+    regionStore.overlay?.targetRegionId === props.regionId
+)
+
+const overlayBaseRegionId = computed(() =>
+    isOverlayTarget.value ? regionStore.overlay?.baseRegionId : null
+)
+
+const overlayLabel = computed(() => {
+  if (!isOverlayTarget.value || !overlayBaseRegionId.value) return ""
+  return `Overlay: Region ${overlayBaseRegionId.value} on Region ${props.regionId}`
+})
+
+function isStateTransitionKey(k) {
+  return String(k).includes("→")
+}
+
+function stateArrayKey(arr) {
+  return (arr || []).map(v => String(v).replace(/[()']/g, "").trim()).join("→")
+}
+
+const highOrderStateKeySet = computed(() => {
+  const glyph = payloadStore.payload?.glyph || {}
+  const maxOrder = payloadStore.payload?.max_order || 3
+  const keys = new Set()
+  Object.values(glyph).forEach(g => {
+    const states = Array.isArray(g?.full_order_states)
+        ? g.full_order_states
+        : (g?.unique_states || []).filter(st => Array.isArray(st) && st.length === maxOrder)
+    states.forEach(st => keys.add(normalizeStateKey(stateArrayKey(st))))
+  })
+  return keys
+})
+
+function classifyStateAnchor(value) {
+  const normalized = normalizeStateKey(value)
+  if (highOrderStateKeySet.value.has(normalized)) return "hoState"
+  return isStateTransitionKey(value) ? "firstOrderEdge" : "firstOrderNode"
+}
+
+const sliceAnchorOptions = computed(() => {
+  const b = brush.value
+  if (!b) return []
+
+  const options = []
+  ;(b.edges || []).forEach(edge => {
+    options.push({
+      id: `hoEdge:${edge}`,
+      type: "hoEdge",
+      value: edge,
+      label: `HO Edge ${edge}`
+    })
+  })
+  Array.from(b.classes || []).forEach(cls => {
+    options.push({
+      id: `hoNode:${cls}`,
+      type: "hoNode",
+      value: String(cls),
+      label: `HO Node ${cls}`
+    })
+  })
+  Array.from(b.states || []).forEach(state => {
+    const value = String(state)
+    const type = classifyStateAnchor(value)
+    const labelPrefix =
+        type === "hoState"
+            ? "HO State"
+            : (type === "firstOrderEdge" ? "First-order Edge" : "First-order Node")
+    options.push({
+      id: `${type}:${value}`,
+      type,
+      value,
+      label: `${labelPrefix} ${value}`
+    })
+  })
+  return options
+})
+
+const selectedSliceAnchor = computed(() =>
+    sliceAnchorOptions.value.find(option => option.id === region.value?.sliceAnchor) || null
+)
+
+function handleDragStart(event) {
+  const r = region.value
+  if (!r?.applied || r.id === "root" || r.id === "global") return
+  event.dataTransfer.effectAllowed = "copy"
+  event.dataTransfer.setData("text/plain", r.id)
+}
+
+function handleDrop(event) {
+  event.preventDefault()
+  const target = region.value
+  const baseId = event.dataTransfer.getData("text/plain")
+  if (!target?.applied || target.id === "root" || target.id === "global") return
+  if (!baseId || baseId === target.id) return
+
+  const base = regionStore.regions[baseId]
+  if (!base?.applied) return
+  regionStore.setOverlay(baseId, target.id)
+}
 
 // Apply 前也提前写入 source 信息，避免 ForceGraph baseline 依赖全局 preview 时序
 watchEffect(() => {
@@ -71,9 +188,13 @@ watchEffect(() => {
 
 
 function handleSliceModeChange() {
-  // 可选：在切换模式时执行一些操作
-  console.log('Slice mode changed:', region.value.sliceMode)
-  // 比如可以触发重新渲染或更新其他状态
+  activateRegionPanel()
+}
+
+function activateRegionPanel() {
+  const r = region.value
+  if (!r?.id || regionStore.activeRegionId === r.id) return
+  regionStore.setActive(r.id)
 }
 
 function apply() {
@@ -90,6 +211,53 @@ function apply() {
   const sourceRid = brushStore.preview?.sourceRid
   if (sourceRid) {
     regionStore.setHighlightData(sourceRid, null, null)
+  }
+}
+
+function openRebuildDialog(event) {
+  const r = region.value
+  if (!r || r.id === "root" || r.id === "global") return
+
+  const defaultK = r.modelInfo?.num_clusters || Math.max(2, Math.min(12, Math.round(Math.sqrt(r.sequenceIds?.length || 4))))
+  modelInputNumber.value = defaultK
+  modelDialogX.value = event.clientX - 170
+  modelDialogY.value = event.clientY + 12
+  showModelDialog.value = true
+}
+
+function closeRebuildDialog() {
+  showModelDialog.value = false
+}
+
+function resetLocalModel() {
+  const r = region.value
+  if (!r) return
+  regionStore.resetRegionModel(r.id, payloadStore.payload)
+  payloadStore.clearSelectionForRegion(r.id)
+}
+
+async function confirmRebuildModel() {
+  const r = region.value
+  if (!r || r.id === "root" || r.id === "global") return
+
+  const nClusters = Number.parseInt(modelInputNumber.value, 10)
+  if (!Number.isFinite(nClusters) || nClusters < 1) {
+    window.alert("Please enter a positive integer.")
+    return
+  }
+  if (r.sliceMode && !selectedSliceAnchor.value) {
+    window.alert("Please choose a Slice Anchor first.")
+    return
+  }
+
+  showModelDialog.value = false
+  const rebuilt = await regionStore.rebuildRegionModel(r.id, {
+    nClusters,
+    refineSteps: 4,
+    firstOrderSequences: r.sliceMode ? panelData.value.slicedFirstOrderSequences : null
+  })
+  if (rebuilt) {
+    payloadStore.clearSelectionForRegion(r.id)
   }
 }
 
@@ -169,6 +337,22 @@ function findEdgeFirstIndices(seq, edgePairs) {
   return result
 }
 
+function findEdgeAllMatches(seq, edgePair) {
+  const result = []
+  if (!Array.isArray(seq) || !Array.isArray(edgePair) || edgePair.length < 2) return result
+  const [a, b] = edgePair
+  for (let i = 0; i < seq.length - 1; i++) {
+    if (seq[i] === a && seq[i + 1] === b) {
+      result.push({
+        idx: i,
+        patternLen: 2,
+        seqLen: seq.length
+      })
+    }
+  }
+  return result
+}
+
 function mergeConnectedEdges(matches) {
   // 按 idx 排序
   matches.sort((a, b) => a.idx - b.idx)
@@ -215,6 +399,12 @@ function sliceByWindow(seq, startIdx, patternLen, prev, next) {
   const left = Math.max(0, Number(startIdx) - Number(prev))
   const right = Math.min(Number(seq.length), Number(startIdx) + Number(patternLen) + Number(next))
   return seq.slice(left, right)
+}
+
+function sliceWindowBounds(seqLen, startIdx, patternLen, prev, next) {
+  const left = Math.max(0, Number(startIdx) - Number(prev))
+  const right = Math.min(Number(seqLen), Number(startIdx) + Number(patternLen) + Number(next))
+  return { left, right }
 }
 
 function normalizeStateKey(k) {
@@ -288,6 +478,171 @@ function sliceByStateOnTokenSeq(seq, stateSet, prev, next) {
   return null
 }
 
+function findStateMatchesOnTokenSeq(seq, stateKey) {
+  if (!Array.isArray(seq) || !stateKey) return []
+  const tokens = seq.map(x => String(x).replace(/[()']/g, "").trim())
+  const normalizedTarget = normalizeStateKey(stateKey)
+  const matches = []
+
+  for (let i = 0; i < tokens.length; i++) {
+    for (let j = i + 1; j <= tokens.length; j++) {
+      const key = tokens.slice(i, j).join("→")
+      if (normalizeStateKey(key) === normalizedTarget) {
+        matches.push({
+          idx: i,
+          patternLen: j - i,
+          seqLen: tokens.length
+        })
+      }
+    }
+  }
+  return matches
+}
+
+function memberStatesForClass(classId) {
+  const glyph = payloadStore.payload?.glyph?.[String(classId)]
+  const maxOrder = payloadStore.payload?.max_order || 3
+  return Array.isArray(glyph?.full_order_states)
+      ? glyph.full_order_states
+      : (glyph?.unique_states || []).filter(st => Array.isArray(st) && st.length === maxOrder)
+}
+
+function memberStateKeysForClass(classId) {
+  const states = memberStatesForClass(classId)
+  return new Set(states.map(st => normalizeStateKey(stateArrayKey(st))))
+}
+
+const state2posIndex = computed(() => {
+  const index = new Map()
+  Object.entries(payloadStore.payload?.state2pos || {}).forEach(([key, value]) => {
+    index.set(canonicalJsonKey(key), value)
+  })
+  return index
+})
+
+function highOrderProjectionForTokenSeq(tokenSeq) {
+  const maxOrder = payloadStore.payload?.max_order || 3
+  const map = st2cls.value
+  if (!Array.isArray(tokenSeq) || !map) return []
+
+  return buildHighOrderStatesFromFirstOrder(tokenSeq, maxOrder)
+      .map((state, endIdx) => ({
+        state,
+        key: normalizeStateKey(stateArrayKey(state)),
+        classId: exactStateTokensToClass(state, map),
+        startIdx: endIdx - state.length + 1,
+        endIdx,
+        length: state.length
+      }))
+}
+
+function exactStateTokensToClass(stTokens, st2clsMap) {
+  if (!Array.isArray(stTokens) || !st2clsMap) return null
+  const key = stTokens.map(v => String(v).replace(/[()']/g, "").trim()).join("→")
+  return st2clsMap.has(key) ? st2clsMap.get(key) : null
+}
+
+function findHoNodeMatchesOnTokenSeq(tokenSeq, classId, seqId = null) {
+  const maxOrder = payloadStore.payload?.max_order || 3
+  const memberStates = memberStatesForClass(classId)
+  const statePosMatches = []
+
+  if (seqId != null && state2posIndex.value.size > 0) {
+    memberStates.forEach(state => {
+      const key = canonicalJsonKey(JSON.stringify(state.map(v => String(v).replace(/[()']/g, "").trim())))
+      const posMap = state2posIndex.value.get(key)
+      const positions = posMap?.[String(seqId)] || []
+      positions.forEach(pos => {
+        const patternLen = state.length
+        const idx = Number(pos) - patternLen + 1
+        if (idx < 0) return
+        const actualKey = normalizeStateKey(stateArrayKey(tokenSeq.slice(idx, idx + patternLen)))
+        const expectedKey = normalizeStateKey(stateArrayKey(state))
+        if (actualKey !== expectedKey) return
+        statePosMatches.push({
+          idx,
+          patternLen,
+          seqLen: tokenSeq.length
+        })
+      })
+    })
+  }
+
+  if (statePosMatches.length > 0) {
+    return statePosMatches
+  }
+
+  const memberKeys = memberStateKeysForClass(classId)
+  if (!memberKeys.size) return []
+
+  return highOrderProjectionForTokenSeq(tokenSeq)
+      .filter(item =>
+          item.length === maxOrder &&
+          String(item.classId) === String(classId) &&
+          memberKeys.has(item.key)
+      )
+      .map(item => ({
+        idx: item.startIdx,
+        patternLen: item.length,
+        seqLen: tokenSeq.length
+      }))
+}
+
+function findHoEdgeMatchesOnTokenSeq(tokenSeq, edgePair) {
+  const maxOrder = payloadStore.payload?.max_order || 3
+  const [sourceClass, targetClass] = edgePair || []
+  if (sourceClass == null || targetClass == null) return []
+
+  const projection = highOrderProjectionForTokenSeq(tokenSeq)
+  const matches = []
+  for (let i = 0; i < projection.length - 1; i++) {
+    const source = projection[i]
+    const target = projection[i + 1]
+    if (
+        source.length !== maxOrder ||
+        target.length !== maxOrder ||
+        String(source.classId) !== String(sourceClass) ||
+        String(target.classId) !== String(targetClass)
+    ) {
+      continue
+    }
+
+    matches.push({
+      idx: source.startIdx,
+      patternLen: target.endIdx - source.startIdx + 1,
+      seqLen: tokenSeq.length
+    })
+  }
+  return matches
+}
+
+function appendFirstOrderWindow(match, tokenSeq, prev, next, sequences, slicedFirstOrderSequences) {
+  const { left, right } = sliceWindowBounds(tokenSeq.length, match.idx, match.patternLen, prev, next)
+  const slice = tokenSeq.slice(left, right)
+  const clsSeq = firstOrderSliceToClassSeq(slice)
+
+  if (clsSeq.length > 1) {
+    sequences.push(clsSeq)
+    slicedFirstOrderSequences.push([...slice])
+  }
+}
+
+function firstOrderSliceToClassSeq(slice) {
+  const maxOrder = payloadStore.payload?.max_order || 3
+  const hoStates = buildHighOrderStatesFromFirstOrder(
+      slice,
+      maxOrder
+  )
+
+  const map = st2cls.value
+  if (!map) return []
+
+  return hoStates
+      .filter(st => st.length === maxOrder)
+      .map(st => exactStateTokensToClass(st, map))
+      .filter(c => c != null)
+}
+
 /* ===== 为 states 模式预建映射（每个 panel 一次） ===== */
 const st2cls = computed(() => {
   const glyph = payloadStore.payload?.glyph
@@ -300,6 +655,20 @@ const panelData = computed(() => {
 
   const r = region.value
   const b = brush.value
+
+  if (r?.modelPayload) {
+    const seqs = r.modelPayload.raw_sequences || []
+    return {
+      sequences: seqs,
+      slicedFirstOrderSequences: r.modelPayload.first_order_sequences || [],
+      matchedCount: seqs.length,
+      prevMax: 0,
+      nextMax: 0,
+      brush: b,
+      sliceMode: false,
+      modelPayload: r.modelPayload
+    }
+  }
 
   const fullRaw = payloadStore.payload?.raw_sequences || []
   const fullTok = payloadStore.payload?.first_order_sequences || []
@@ -330,111 +699,58 @@ const panelData = computed(() => {
 
   let maxPrevBound = 0
   let maxNextBound = 0
+  const anchor = selectedSliceAnchor.value
+  const shouldSlice = Boolean(r.sliceMode && anchor)
 
   for (const i of seqIds) {
 
-    const seq = fullRaw[i]
     const tokenSeq = fullTok[i]
+    const seq = fullRaw[i]
 
     if (!seq) continue
+    matchedSequences.push(seq)
 
-    // ① edges 模式
-    if (b.edges?.length > 0) {
+    if (!shouldSlice) continue
+    if (!tokenSeq) continue
 
-      const edgePairs = parseEdgePairs(b.edges)
-      const matches = findEdgeFirstIndices(seq, edgePairs)
-
-      if (matches) {
-
-        matchedSequences.push(seq)
-
-        const mergedBlocks = mergeConnectedEdges(matches)
-
-        for (const block of mergedBlocks) {
-
-          const start = block.startIdx
-          const patternLen = block.endIdx - block.startIdx + 1
-
-          maxPrevBound = Math.max(maxPrevBound, start)
-          maxNextBound = Math.max(maxNextBound, seq.length - (start + patternLen))
-
-          const windowSeq = sliceByWindow(seq, start, patternLen, r.prev, r.next)
-
-          sequences.push(windowSeq)
-          if (tokenSeq && tokenSeq.length > 0) {
-            const left = Math.max(0, Number(start) - Number(r.prev))
-            const right = Math.min(tokenSeq.length, Number(start) + Number(patternLen) + Number(r.next))
-            slicedFirstOrderSequences.push(tokenSeq.slice(left, right))
-          }
-        }
-      }
-    }
-
-    // ② class 模式
-    else if (b.classes && b.classes.size > 0) {
-
-      const matches = sliceByClassSeq(seq, b.classes, r.prev, r.next)
-
-      if (!matches) continue
-
-      matchedSequences.push(seq)
-
-      for (const match of matches) {
-
-        const { slice, idx, patternLen, seqLen } = match
-
+    if (anchor.type === "hoEdge") {
+      const edgePair = parseEdgePairs([anchor.value])[0]
+      const matches = findHoEdgeMatchesOnTokenSeq(tokenSeq, edgePair)
+      matches.forEach(match => {
+        const { idx, patternLen, seqLen } = match
         maxPrevBound = Math.max(maxPrevBound, idx)
         maxNextBound = Math.max(maxNextBound, seqLen - (idx + patternLen))
-
-        if (slice.length > 1) {
-          sequences.push(slice)
-          if (tokenSeq && tokenSeq.length > 0) {
-            const left = Math.max(0, idx - Number(r.prev))
-            const right = Math.min(tokenSeq.length, idx + 1 + Number(r.next))
-            slicedFirstOrderSequences.push(tokenSeq.slice(left, right))
-          }
-        }
-      }
-    }
-
-    // ③ states 模式
-    else if (b.states && b.states.size > 0) {
-
-      if (!tokenSeq) continue
-
-      const match = sliceByStateOnTokenSeq(tokenSeq, b.states, r.prev, r.next)
-
-      if (!match) continue
-
-      matchedSequences.push(seq)
-
-      const { slice, idx, patternLen, seqLen } = match
-
-      maxPrevBound = Math.max(maxPrevBound, idx)
-      maxNextBound = Math.max(maxNextBound, seqLen - (idx + patternLen))
-
-      const hoStates = buildHighOrderStatesFromFirstOrder(
-          slice,
-          payloadStore.payload?.max_order || 3
-      )
-
-      const map = st2cls.value
-      if (!map) continue
-
-      const clsSeq = hoStates
-          .map(st => stateTokensToClass(st, map, arr => arr.join("→")))
-          .filter(c => c != null)
-
-      if (clsSeq.length > 1) {
-        sequences.push(clsSeq)
-        slicedFirstOrderSequences.push([...slice])
-      }
+        appendFirstOrderWindow(match, tokenSeq, r.prev, r.next, sequences, slicedFirstOrderSequences)
+      })
+    } else if (anchor.type === "hoNode") {
+      const matches = findHoNodeMatchesOnTokenSeq(tokenSeq, anchor.value, i)
+      matches.forEach(match => {
+        const { idx, patternLen, seqLen } = match
+        maxPrevBound = Math.max(maxPrevBound, idx)
+        maxNextBound = Math.max(maxNextBound, seqLen - (idx + patternLen))
+        appendFirstOrderWindow(match, tokenSeq, r.prev, r.next, sequences, slicedFirstOrderSequences)
+      })
+    } else if (
+        anchor.type === "hoState" ||
+        anchor.type === "firstOrderNode" ||
+        anchor.type === "firstOrderEdge"
+    ) {
+      const matches = findStateMatchesOnTokenSeq(tokenSeq, anchor.value)
+      matches.forEach(match => {
+        const { idx, patternLen, seqLen } = match
+        maxPrevBound = Math.max(maxPrevBound, idx)
+        maxNextBound = Math.max(maxNextBound, seqLen - (idx + patternLen))
+        appendFirstOrderWindow(match, tokenSeq, r.prev, r.next, sequences, slicedFirstOrderSequences)
+      })
     }
   }
 
-  if (r.sliceMode) {
+  if (r.sliceMode && anchor) {
     finalseqs = sequences
     finalFirstOrder = slicedFirstOrderSequences
+  } else if (r.sliceMode && !anchor) {
+    finalseqs = []
+    finalFirstOrder = []
   } else {
     finalseqs = matchedSequences
   }
@@ -452,18 +768,24 @@ const panelData = computed(() => {
 
 
 /* ✅ 把“写回 slider 上界 + clamp”放到 watchEffect（不要在 computed 里做副作用） */
+function writePanelDataToRegion(r) {
+  if (!r || r.modelPayload) return
+  const data = panelData.value
+  r.sequences = data.sequences
+  r.slicedFirstOrderSequences = data.slicedFirstOrderSequences ?? []
+}
+
 watchEffect(() => {
   const r = region.value
   // if (!r) return
   if (!r || !r.applied) return  // ⭐ 只有 applied 后才自动调整
 
-  const data = panelData.value
+  if (r.sliceAnchor && !sliceAnchorOptions.value.some(option => option.id === r.sliceAnchor)) {
+    r.sliceAnchor = null
+  }
 
-  // ⭐ 写回 region（类序列 + slice 时的 first_order 供 RawSequence 用）
-  r.sequences = data.sequences
-  r.slicedFirstOrderSequences = data.slicedFirstOrderSequences ?? []
-
-  const { prevMax, nextMax } = panelData.value
+  const boundsData = panelData.value
+  const { prevMax, nextMax } = boundsData
 
   const prevChanged = r.prevMax !== prevMax
   const nextChanged = r.nextMax !== nextMax
@@ -471,94 +793,207 @@ watchEffect(() => {
   r.prevMax = prevMax
   r.nextMax = nextMax
 
+  let windowChanged = false
+
   // ✅ 初始化时自动拉满
   if (prevChanged && r.prev === 0 && prevMax > 0) {
     // r.prev = prevMax
     r.prev = 1
+    windowChanged = true
   }
 
   if (nextChanged && r.next === 0 && nextMax > 0) {
     // r.next = nextMax
     r.next = 1
+    windowChanged = true
   }
 
   // clamp（防止越界）
-  if (r.prev > prevMax) r.prev = prevMax
-  if (r.next > nextMax) r.next = nextMax
+  if (r.prev > prevMax) {
+    r.prev = prevMax
+    windowChanged = true
+  }
+  if (r.next > nextMax) {
+    r.next = nextMax
+    windowChanged = true
+  }
+
+  // prev/next 刚被自动修正时，boundsData 仍然是旧窗口算出来的。
+  // 下一次 Vue 更新后显式写回最新 slice，避免序列视图拿到空缓存或长度 3 的中间态。
+  if (windowChanged) {
+    nextTick(() => {
+      if (region.value?.id === r.id) writePanelDataToRegion(r)
+    })
+    return
+  }
+
+  // ⭐ 写回 region（类序列 + slice 时的 first_order 供 RawSequence 用）
+  writePanelDataToRegion(r)
 
 })
 </script>
 
 <template>
+  <Teleport to="body">
+    <div
+        v-if="showModelDialog"
+        class="rebuild-dialog"
+        :style="{ left: modelDialogX + 'px', top: modelDialogY + 'px' }"
+        @click.stop
+    >
+      <div class="dialog-actions">
+        <img
+            src="../assets/confirm.png"
+            alt="confirm"
+            title="Confirm"
+            @click="confirmRebuildModel"
+        />
+        <img
+            src="../assets/delete.png"
+            alt="cancel"
+            title="Cancel"
+            @click="closeRebuildDialog"
+        />
+      </div>
+      <div class="dialog-label">Target HO nodes</div>
+      <input
+          type="number"
+          min="1"
+          v-model.number="modelInputNumber"
+          @keydown.enter="confirmRebuildModel"
+      />
+    </div>
+  </Teleport>
+
   <div
       class="panel"
-      :class="{ active: region?.id === regionStore.activeRegionId }"
+      :class="{
+        active: region?.id === regionStore.activeRegionId,
+        'overlay-base': isOverlayBase,
+        'overlay-target': isOverlayTarget
+      }"
       :style="{ borderColor: brush ? brush.color : '#ccc' }"
+      @dragover.prevent
+      @drop="handleDrop"
   >
-    <div class="panel-header" @click="regionStore.setActive(region.id)">
+    <div
+        class="panel-header"
+        draggable="true"
+        @dragstart="handleDragStart"
+        @click="regionStore.setActive(region.id)"
+    >
       <span v-if="brush" class="dot" :style="{ background: brush.color }" />
       <span class="title-stack">
         <span class="small-title">{{ regionTitle }}</span>
         <span v-if="regionSubtitle" class="subtitle">{{ regionSubtitle }}</span>
+        <span v-if="overlayLabel" class="subtitle overlay-label">{{ overlayLabel }}</span>
       </span>
 
-      <div class="panel-controls" v-if="region.sliceMode && region.prevMax > 0" @click.stop>
-        <div class="ctrl">
-          <span>Prev</span>
-          <input type="range" min="0" :max="region.prevMax" v-model="region.prev" style="width: 65px !important;"/>
-          <!-- ⭐ 改为可编辑数字输入，和滑动条双向绑定 -->
-          <input
-              type="number"
-              v-model.number="region.prev"
-              :min="0"
-              :max="region.prevMax"
-              class="range-input"
-              style="width: 30px !important;"
-          />
+      <div class="header-scroll" @pointerdown.stop="activateRegionPanel" @click.stop>
+        <div class="panel-controls" v-if="region.sliceMode && region.prevMax > 0">
+          <div class="ctrl">
+            <span>Prev</span>
+            <input
+                type="number"
+                v-model.number="region.prev"
+                :min="0"
+                :max="region.prevMax"
+                class="range-input"
+                style="width: 30px !important;"
+            />
+          </div>
         </div>
-      </div>
 
-      <div class="panel-controls" v-if="region.sliceMode && region.nextMax > 0" @click.stop>
-        <div class="ctrl">
-          <span>Next</span>
-          <input type="range" min="0" :max="region.nextMax" v-model="region.next"  style="width: 65px !important;"/>
-          <input
-              type="number"
-              v-model.number="region.next"
-              :min="0"
-              :max="region.nextMax"
-              class="range-input"
-              style="width: 30px !important;"
-          />
+        <div class="panel-controls" v-if="region.sliceMode && region.nextMax > 0">
+          <div class="ctrl">
+            <span>Next</span>
+            <input
+                type="number"
+                v-model.number="region.next"
+                :min="0"
+                :max="region.nextMax"
+                class="range-input"
+                style="width: 30px !important;"
+            />
+          </div>
         </div>
-      </div>
 
-      <!-- 新增：将三个按钮放在一个容器里 -->
-      <div class="panel-actions">
-        <span class="count">
-          {{ region.sliceMode ? '' : panelData.matchedCount + ' seqs' }}
-          {{ region.sliceMode ? panelData.sequences.length + ' slices' : '' }}
-        </span>
+        <div class="panel-controls anchor-control" v-if="region.sliceMode">
+          <div class="ctrl">
+            <span>Anchor</span>
+            <select v-model="region.sliceAnchor" class="anchor-select">
+              <option :value="null">Choose</option>
+              <option
+                  v-for="option in sliceAnchorOptions"
+                  :key="option.id"
+                  :value="option.id"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </div>
+        </div>
 
-        <!-- ⭐ 新增：切片模式切换复选框 -->
-        <label class="slice-mode" title="Show sliced sequences" @click.stop>
-          <input
-              type="checkbox"
-              v-model="region.sliceMode"
-              @change="handleSliceModeChange"
-          />
-          <span>Slice</span>
-        </label>
+        <!-- 新增：将三个按钮放在一个容器里 -->
+        <div class="panel-actions">
+          <span class="count">
+            {{ region.sliceMode ? (selectedSliceAnchor ? panelData.sequences.length + ' slices' : 'choose anchor') : panelData.matchedCount + ' seqs' }}
+          </span>
 
-        <button class="close" title="Remove region" @click.stop="regionStore.remove(region.id)">
-          <img src="../assets/delete.png" alt="delete" style="width: 16px; height: 16px;">
-        </button>
+          <!-- ⭐ 新增：切片模式切换复选框 -->
+          <label class="slice-mode" title="Show sliced sequences">
+            <input
+                type="checkbox"
+                v-model="region.sliceMode"
+                @change="handleSliceModeChange"
+            />
+            <span>Slice</span>
+          </label>
 
+          <button
+              v-if="isOverlayTarget"
+              class="clear-overlay"
+              title="Clear overlay"
+              @click.stop="regionStore.clearOverlay()"
+          >
+            Clear
+          </button>
+
+          <button
+              v-if="region.id !== 'root' && region.id !== 'global' && region.applied"
+              class="model-button"
+              :disabled="region.modelStatus === 'running' || !region.sequenceIds?.length"
+              :title="region.modelError || 'Re-aggregate high-order network on this region'"
+              @click.stop="openRebuildDialog"
+          >
+            {{ region.modelStatus === 'running' ? 'Running' : (region.modelStatus === 'ready' ? 'Rebuild' : 'Re-aggregate') }}
+          </button>
+
+          <button
+              v-if="region.modelPayload || region.modelStatus === 'error'"
+              class="model-button"
+              title="Restore the pre-aggregation projection"
+              @click.stop="resetLocalModel"
+          >
+            Reset
+          </button>
+
+          <button class="close" title="Remove region" @click.stop="regionStore.remove(region.id)">
+            <img src="../assets/delete.png" alt="delete" style="width: 16px; height: 16px;">
+          </button>
+
+        </div>
       </div>
     </div>
 
-    <ForceGraph v-if="panelData.sequences.length"  :externalSequences="panelData.sequences"
-                :regionId="region.id" :sourceRegionId="region.sourceRegionId"/>
+    <ForceGraph
+        v-if="panelData.sequences.length"
+        :externalSequences="panelData.sequences"
+        :payloadData="panelData.modelPayload"
+        :regionId="region.id"
+        :sourceRegionId="region.sourceRegionId"
+        :overlayBaseRegionId="overlayBaseRegionId"
+    />
 
     <div v-else class="empty">
       <div class="empty-title">Empty Region</div>
@@ -568,6 +1003,53 @@ watchEffect(() => {
 </template>
 
 <style scoped>
+.rebuild-dialog {
+  position: fixed;
+  z-index: 100000;
+  width: 132px;
+  min-height: 54px;
+  padding: 14px 12px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  color: var(--text-main);
+}
+
+.dialog-actions {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  display: flex;
+  gap: 5px;
+}
+
+.dialog-actions img {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  opacity: 0.86;
+  transition: opacity 0.15s ease;
+}
+
+.dialog-actions img:hover {
+  opacity: 1;
+}
+
+.dialog-label {
+  margin: 8px 0 5px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rebuild-dialog input {
+  width: 54px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+}
 
 /* panel */
 .panel {
@@ -593,15 +1075,47 @@ watchEffect(() => {
   color: var(--text-main);
 }
 
+.header-scroll {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(107, 114, 128, 0.35) transparent;
+  padding: 1px 0 3px;
+}
+
+.header-scroll::-webkit-scrollbar {
+  height: 5px;
+}
+
+.header-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.header-scroll::-webkit-scrollbar-thumb {
+  background: rgba(107, 114, 128, 0.3);
+  border-radius: 999px;
+}
+
+.header-scroll > * {
+  flex: 0 0 auto;
+}
+
 /* 新增：按钮组容器 */
 .panel-actions {
   display: flex;
+  align-items: center;
   gap: 1px;           /* 按钮之间的间距 */
-  margin-left: auto;   /* 关键：将整个按钮组推到右边 */
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* 统一按钮基础样式 */
-.close, .apply {
+.close, .apply, .clear-overlay, .model-button {
   border: 1px solid transparent;
   background: transparent;
   cursor: pointer;
@@ -614,9 +1128,30 @@ watchEffect(() => {
   line-height: 1;
 }
 
-.close:hover, .apply:hover {
+.close:hover, .apply:hover, .clear-overlay:hover, .model-button:hover {
   background: var(--accent-soft);
   border-color: rgba(47, 111, 159, 0.25);
+}
+
+.clear-overlay {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  color: var(--accent);
+}
+
+.model-button {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.model-button:disabled {
+  cursor: default;
+  color: var(--text-muted);
+  opacity: 0.65;
 }
 
 .dot {
@@ -648,11 +1183,6 @@ watchEffect(() => {
   width: auto; /* 紧凑并排：不要固定宽度避免元素挤压/遮挡 */
 }
 
-.ctrl input[type="range"] {
-  width: 75px !important; /* 与模板内联样式保持一致，避免被其它规则覆盖 */
-  flex-shrink: 0;
-}
-
 .ctrl input[type="number"] {
   flex-shrink: 0;
 }
@@ -662,6 +1192,14 @@ watchEffect(() => {
   border-color: rgba(47, 111, 159, 0.75) !important;
   box-shadow: 0 0 0 2px rgba(47, 111, 159, 0.12), 0 10px 24px rgba(36, 49, 66, 0.12);
   z-index: 2;
+}
+
+.panel.overlay-base {
+  box-shadow: inset 0 0 0 2px rgba(154, 51, 64, 0.18);
+}
+
+.panel.overlay-target {
+  box-shadow: inset 0 0 0 2px rgba(47, 111, 159, 0.22), 0 10px 24px rgba(36, 49, 66, 0.12);
 }
 
 .apply {
@@ -701,7 +1239,9 @@ watchEffect(() => {
 }
 
 .title-stack {
-  min-width: 0;
+  min-width: 54px;
+  max-width: 115px;
+  flex: 0 1 115px;
   display: grid;
   gap: 1px;
 }
@@ -713,6 +1253,11 @@ watchEffect(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.overlay-label {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .empty-hint {
@@ -737,10 +1282,12 @@ watchEffect(() => {
 .panel-controls {
   display: flex;
   gap: 6px;
-  padding: 5px 1px;
-  border-bottom: 1px solid var(--panel-border);
+  padding: 1px 1px;
+  border-bottom: none;
   font-size: 12px;
   color: var(--text-muted);
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .panel-controls .ctrl {
@@ -749,11 +1296,6 @@ watchEffect(() => {
   gap: 1px;
 }
 
-.panel-controls input[type="range"] {
-  width: 80px;
-}
-
-/* 数字输入框样式，与滑动条配合使用 */
 .range-input {
   width: 48px;
   padding: 2px 4px;
@@ -761,6 +1303,21 @@ watchEffect(() => {
   border: 1px solid var(--panel-border);
   font-size: 12px;
   color: var(--text-main);
+}
+
+.anchor-control {
+  max-width: 150px;
+}
+
+.anchor-select {
+  max-width: 92px;
+  height: 21px;
+  padding: 1px 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--text-main);
+  font-size: 11px;
 }
 
 /* 切片模式切换复选框 */

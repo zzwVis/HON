@@ -17,6 +17,21 @@ import { useBrushStore } from "@/store/brushStore.js"
 import Graph from "graphology"
 import forceAtlas2 from "graphology-layout-forceatlas2"
 
+const props = defineProps({
+  fixedMode: {
+    type: String,
+    default: null
+  },
+  modes: {
+    type: Array,
+    default: () => ["sequence", "sankey", "graph"]
+  },
+  initialMode: {
+    type: String,
+    default: null
+  }
+})
+
 /* ===============================
  * refs & store
  * =============================== */
@@ -78,8 +93,16 @@ function getDisplayToken(token, legend) {
 }
 const svgRef = ref(null)
 const tooltipRef = ref(null)
-// 可视化模式：序列图 / 桑基图 / Graph(FA2)
-const viewMode = ref("graph")   // "sequence" | "sankey" | "graph"
+const modeLabels = {
+  sequence: "Sequence",
+  sankey: "Sankey",
+  graph: "FIRST-ORDER NETWORK"
+}
+const availableModes = computed(() => {
+  const modes = props.fixedMode ? [props.fixedMode] : props.modes
+  return modes.filter(mode => modeLabels[mode])
+})
+const viewMode = ref(props.fixedMode || props.initialMode || availableModes.value[0] || "sequence")
 const isViewSelecting = ref(false)
 const pendingRenderData = ref(null)
 
@@ -97,13 +120,17 @@ const sequenceData = computed(() => {
 
   const full = payloadStore.payload
 
-  // ⭐ slice 开启时使用 region 的切片 first_order，与 Sequence.vue 的 region.sequences 一致
-  if (region.sliceMode && region.slicedFirstOrderSequences?.length > 0) {
+  // Slice 开启时严格使用当前 region 的切片 first-order 序列。
+  // 即使结果为空，也不能回退到未切片序列，否则桑基图/时间轴会看起来没有响应 slice。
+  if (region.sliceMode) {
+    const sliced = Array.isArray(region.slicedFirstOrderSequences)
+        ? region.slicedFirstOrderSequences
+        : []
     return {
       ...full,
-      raw_sequences: region.slicedFirstOrderSequences,
-      first_order_sequences: region.slicedFirstOrderSequences,
-      sequence_ids: region.slicedFirstOrderSequences.map((_, i) => i)
+      raw_sequences: sliced,
+      first_order_sequences: sliced,
+      sequence_ids: sliced.map((_, i) => i)
     }
   }
 
@@ -187,6 +214,41 @@ watch(
     { flush: "post" }
 )
 
+watch(
+    () => [props.fixedMode, props.initialMode, props.modes.join("|")],
+    () => {
+      const nextModes = availableModes.value
+      const next = props.fixedMode || (nextModes.includes(viewMode.value) ? viewMode.value : (props.initialMode || nextModes[0]))
+      if (next && next !== viewMode.value) viewMode.value = next
+    }
+)
+
+watch(
+    () => payloadStore.selectedFirstOrderState,
+    () => {
+      refreshSelectedStateRing()
+    }
+)
+
+function refreshSelectedStateRing() {
+  d3.select(svgRef.value)
+      .selectAll(".selected-state-ring")
+      .attr("opacity", 0)
+}
+
+function entropyFromTransitionLinks(links) {
+  const values = (links || []).map(l => Number(l.value || 0)).filter(v => v > 0)
+  const sum = d3.sum(values)
+  if (sum <= 0 || values.length <= 1) return 0
+
+  const h = values.reduce((acc, v) => {
+    const p = v / sum
+    return acc - p * Math.log2(p)
+  }, 0)
+
+  return h / Math.log2(values.length)
+}
+
 function renderByMode(data) {
   if (!data) {
     d3.select(svgRef.value).selectAll("*").remove()
@@ -205,8 +267,8 @@ function renderByMode(data) {
 function showTooltip(html, event) {
   const el = d3.select(tooltipRef.value)
   el.html(html)
-      .style("left", event.offsetX + 12 + "px")
-      .style("top", event.offsetY + 12 + "px")
+      .style("left", event.clientX + 12 + "px")
+      .style("top", event.clientY + 12 + "px")
       .style("opacity", 1)
 }
 
@@ -215,16 +277,9 @@ function hideTooltip() {
 }
 
 function moveTooltip(event) {
-  const wrapper = svgRef.value?.parentElement   // .seq-view-wrapper
-  if (!wrapper) return
-
-  const rect = wrapper.getBoundingClientRect()
-  const x = event.clientX - rect.left + wrapper.scrollLeft
-  const y = event.clientY - rect.top + wrapper.scrollTop
-
   d3.select(tooltipRef.value)
-      .style("left", x + 12 + "px")
-      .style("top", y - 12 + "px")
+      .style("left", event.clientX + 12 + "px")
+      .style("top", event.clientY - 12 + "px")
 }
 
 function buildSankeyFromSequences(seqs) {
@@ -321,46 +376,21 @@ function renderSankey(data) {
 
   const root = svg.append("g")
       .attr("class","root")
-      .attr("transform", "translate(0,0)")   // ⭐ 明确初始状态
 
-  // ==========================
-  // (NEW) value 压缩：缩小极端差距
-  // ==========================
-  const COMPRESS_MODE = "sqrt"   // "sqrt" | "pow" | "log"
-  const ALPHA = 1              // pow 模式才用：0.3~0.6（0.5=sqrt）
-
-  // 取 links 的原始 value（更可靠，因为 node.value 通常由 link 决定）
-  const rawLinkValues = sankeyData.links.map(l => +l.value || 0)
-  const maxV = d3.max(rawLinkValues) || 1
-
-  // 压缩函数：输入 raw value，输出显示用 value（给 sankey 用）
-  const compressValue = (v) => {
-    v = Math.max(0, +v || 0)
-    if (COMPRESS_MODE === "sqrt") return Math.sqrt(v)
-    if (COMPRESS_MODE === "pow")  return Math.pow(v, ALPHA)
-    if (COMPRESS_MODE === "log")  return Math.log1p(v) // log(1+v), 避免 0 问题
-    return v
-  }
-
-  // ===============================
-  // GLOBAL node value (for height)
-  // ===============================
-  const nodeValueMap = {}
-  sankeyData.nodes.forEach(n => {
-    nodeValueMap[n.id] = compressValue(+n.value || 0)
-  })
+  const SANKEY_VIEW_SCALE = 0.84
+  const flowValue = (v) => Math.max(0, +v || 0)
 
   const height = svgRef.value.parentElement.clientHeight || 600
 
   // —— glyph 固定参数（全局常数）——
-  const GLYPH_R = 8           // 减小半径
-  const GLYPH_GAP = 4         // 减小间隙
-  const GLYPH_PADDING = 6
+  const GLYPH_R = 5
+  const GLYPH_GAP = 3
+  const GLYPH_PADDING = 4
   const MIN_NODE_HEIGHT =
-      4 * GLYPH_R +
-      4 * GLYPH_PADDING + 10;   // ⭐ 给文本 / stroke / 误差余量
+      2 * GLYPH_R +
+      2 * GLYPH_PADDING + 8;
 
-  const NODE_PADDING = 10   // 10~14 是非常常见的稳定区间
+  const NODE_PADDING = 6
 
   // —— 从 glyph 数据中取最大阶数 ——
   const maxOrder = d3.max(
@@ -393,14 +423,12 @@ function renderSankey(data) {
       return {
         ...n,
         raw_value: nodeInMap[n.id],   // 用真实入度显示
-        // raw_value: rawValue,
-        // value: compressValue(rawValue)
       }
     }),
     links: sankeyData.links.map(l => ({
       ...l,
       raw_value: +l.value || 0,
-      value: compressValue(+l.value || 0)
+      value: flowValue(+l.value || 0)
     }))
   }
 
@@ -419,7 +447,7 @@ function renderSankey(data) {
 
   const finalHeight = Math.max(
       minRequiredHeight,
-      +svg.attr("height")/6
+      height
   )
 
   svg.attr("height", finalHeight)
@@ -428,8 +456,8 @@ function renderSankey(data) {
   const numColumns =
       d3.max(probeGraph.nodes, d => d.depth) + 1
 
-  const BASE_GAP = 90
-  const MIN_GAP = 50
+  const BASE_GAP = 64
+  const MIN_GAP = 36
 
   const columnGap = Math.max(
       MIN_GAP,
@@ -448,9 +476,11 @@ function renderSankey(data) {
       (numColumns - 1) * columnGap +
       rightMargin
 
-  // —— ⭐ 覆盖 SVG 宽度 ⭐ ——
-  svg.attr("width", requiredWidth)
-  svg.attr("height", finalHeight)
+  // Keep the Sankey layout linear in raw flow, then scale the whole drawing
+  // uniformly so node heights remain proportional to max(in, out).
+  svg.attr("width", requiredWidth * SANKEY_VIEW_SCALE)
+  svg.attr("height", finalHeight * SANKEY_VIEW_SCALE)
+  root.attr("transform", `scale(${SANKEY_VIEW_SCALE})`)
 
   const sk = sankey()
       .nodeId(d => d.id)
@@ -474,13 +504,13 @@ function renderSankey(data) {
       return {
         ...n,
         raw_value: rawValue,
-        value: compressValue(rawValue)  // 使用压缩后的值做布局
+        value: flowValue(rawValue)
       }
     }),
     links: sankeyData.links.map(l => ({
       ...l,
       raw_value: +l.value || 0,
-      value: compressValue(+l.value || 0)
+      value: flowValue(+l.value || 0)
     }))
   }
 
@@ -516,15 +546,15 @@ function renderSankey(data) {
       // .attr("stroke", '#bbb')
       .attr("stroke", d => getTokenColor(d.source.token, color))
       // .attr("stroke", d => linkGray(d.raw_value))
-      .attr("stroke-opacity", 0.6)
-      .attr("stroke-width", d => Math.max(1, d.width * 0.5 ))
+      .attr("stroke-opacity", 0.52)
+      .attr("stroke-width", d => Math.max(1, d.width * 0.34 ))
       .on("mouseenter", function (event, d) {
         const tooltip = d3.select(tooltipRef.value)
         // 1️⃣ 淡化其它边，只高亮当前边
         link
             .transition()
             .duration(200)
-            .attr("stroke-opacity", l => (l === d ? 0.9 : 0.05))
+            .attr("stroke-opacity", l => (l === d ? 0.85 : 0.05))
 
         // 3️⃣ tooltip
         tooltip
@@ -543,7 +573,7 @@ function renderSankey(data) {
         link
             .transition()
             .duration(200)
-            .attr("stroke-opacity", 0.6)
+            .attr("stroke-opacity", 0.52)
             .attr("stroke", d => getTokenColor(d.source.token, color))
             // .attr("stroke", "#bbb")
         // .attr("stroke", d => linkGray(d.raw_value))
@@ -586,7 +616,7 @@ function renderSankey(data) {
             .transition()
             .duration(200)
             .attr("stroke-opacity", l =>
-                (l.source === d || l.target === d) ? 0.9 : 0.05
+                (l.source === d || l.target === d) ? 0.85 : 0.05
             )
 
         const tooltip = d3.select(tooltipRef.value)
@@ -609,7 +639,7 @@ function renderSankey(data) {
         link
             .transition()
             .duration(200)
-            .attr("stroke-opacity", 0.6)
+            .attr("stroke-opacity", 0.52)
 
         d3.select(tooltipRef.value)
             .style("opacity", 0)
@@ -693,8 +723,35 @@ function renderFa2Graph(data) {
     const inLs = inMap.get(n.id) || []
     n.outFlow = d3.sum(outLs, d => d.value)
     n.inFlow = d3.sum(inLs, d => d.value)
-    n.entropy = honvisEntropyFromLinks(outLs)
+    n.entropy = entropyFromTransitionLinks(outLs)
+    n.occurrences = 0
+    n.seqSupport = 0
   })
+
+  const nodeByClass = new Map(nodes.map(n => [String(n.class), n]))
+  seqs.forEach(seq => {
+    const seen = new Set()
+    seq.forEach(v => {
+      const cls = String(v)
+      const node = nodeByClass.get(cls)
+      if (!node) return
+      node.occurrences += 1
+      seen.add(cls)
+    })
+    seen.forEach(cls => {
+      const node = nodeByClass.get(cls)
+      if (node) node.seqSupport += 1
+    })
+  })
+
+  const maxSupport = d3.max(nodes, d => d.seqSupport) || 1
+  const radiusScale = d3.scaleSqrt()
+      .domain([1, maxSupport])
+      .range([5, 13])
+      .clamp(true)
+  const maxEntropy = d3.max(nodes, d => d.entropy) || 1
+  const entropyStroke = d3.scaleSequential(d3.interpolateYlOrRd)
+      .domain([0, maxEntropy])
 
   const layerMap = computeLayerMap(seqs)
   const maxLayer = d3.max(nodes, d => layerMap.get(String(d.class)) ?? 0) || 1
@@ -702,15 +759,13 @@ function renderFa2Graph(data) {
   const g = new Graph({ multi: true, type: "directed", allowSelfLoops: true })
   const xNorm = d3.scaleLinear().domain([0, maxLayer]).range([-500, 500])
 
-  const NODE_R = 10
-
   nodes.forEach(n => {
     const L = layerMap.get(String(n.class)) ?? 0
     const initX = xNorm(L) * 0.5 + (Math.random() - 0.5) * 10
     const initY = (Math.random() - 0.5) * 10
     n.x = initX
     n.y = initY
-    g.addNode(n.id, { ...n, x: initX, y: initY, size: NODE_R + 2 })
+    g.addNode(n.id, { ...n, x: initX, y: initY, size: radiusScale(n.seqSupport) + 3 })
   })
 
   links.forEach((l, i) => {
@@ -730,7 +785,7 @@ function renderFa2Graph(data) {
       outboundAttractionDistribution: true,
       adjustSizes: true,
       gravity: 1,
-      scalingRatio: 1,
+      scalingRatio: 2.4,
       strongGravityMode: true,
       slowDown: 1,
       barnesHutOptimize: true,
@@ -755,10 +810,39 @@ function renderFa2Graph(data) {
   const pad = 30
 
   nodes.forEach(n => {
-    const scale = 0.5
+    const scale = 0.62
     n.x = ((n.x - minX) / layoutW) * (width * scale) + width*(1-scale)/2
     n.y = ((n.y - minY) / layoutH) * (height * scale) + height*(1-scale)/2
   })
+
+  function resolveNodeOverlaps(allNodes, iterations = 40) {
+    for (let it = 0; it < iterations; it++) {
+      let moved = false
+      for (let i = 0; i < allNodes.length; i++) {
+        for (let j = i + 1; j < allNodes.length; j++) {
+          const a = allNodes[i]
+          const b = allNodes[j]
+          const dx = b.x - a.x
+          const dy = b.y - a.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001
+          const minDist = radiusScale(a.seqSupport) + radiusScale(b.seqSupport) + 10
+          if (dist >= minDist) continue
+
+          const push = (minDist - dist) / 2
+          const ux = dx / dist
+          const uy = dy / dist
+          a.x -= ux * push
+          a.y -= uy * push
+          b.x += ux * push
+          b.y += uy * push
+          moved = true
+        }
+      }
+      if (!moved) break
+    }
+  }
+
+  resolveNodeOverlaps(nodes, 60)
 
   const nodeById = new Map(nodes.map(n => [n.id, n]))
   links.forEach(l => {
@@ -778,6 +862,7 @@ function renderFa2Graph(data) {
       .attr("stroke-linecap", "round")
       .attr("opacity", d => linkOpacity(d.value))
       .on("mouseenter", (event, d) => {
+        d3.select(event.currentTarget).style("cursor", "pointer")
         showTooltip(
             `<b>source:</b> ${d.source.class}<br/><b>target:</b> ${d.target.class}<br/><b>value:</b> ${d.value}`,
             event
@@ -791,6 +876,22 @@ function renderFa2Graph(data) {
         hideTooltip()
         linkSel.attr("opacity", l => linkOpacity(l.value))
       })
+      .on("click", (event, d) => {
+        event.stopPropagation()
+        const rid = regionStore.activeRegionId
+        const sourceRid = rid || "global"
+        if (brushStore.interactionMode !== "brush") return
+
+        if (rid) {
+          brushStore.setActivePanelRegion(rid, "region")
+        } else {
+          brushStore.setActivePanelRegion("global", "global")
+        }
+
+        if (!brushStore.activeBrushId) brushStore.createBrush()
+        if (!brushStore.canEditActiveBrushFromRegion(sourceRid)) return
+        brushStore.toggleState(`${d.source.class}→${d.target.class}`)
+      })
 
   const nodeSel = root.append("g")
       .attr("class", "node-layer")
@@ -801,13 +902,25 @@ function renderFa2Graph(data) {
       .attr("class", "node")
 
   nodeSel.append("circle")
-      .attr("r", NODE_R)
+      .attr("r", d => radiusScale(d.seqSupport))
       .attr("fill", d => color(String(d.class)))
-      .attr("stroke-width", 0.8)
+      .attr("stroke", d => entropyStroke(d.entropy))
+      .attr("stroke-width", d => 1.2 + d.entropy * 2.6)
+
+  nodeSel.append("circle")
+      .attr("class", "selected-state-ring")
+      .attr("r", d => radiusScale(d.seqSupport) + 4)
+      .attr("fill", "none")
+      .attr("stroke", "#1f2937")
+      .attr("stroke-width", 1.4)
+      .attr("opacity", 0)
 
   function refresh() {
     linkSel.attr("d", d => {
-      if (d.source.id === d.target.id) return selfLoopTaperedPath(d, NODE_R * 2, NODE_R * 2, 0.4)
+      if (d.source.id === d.target.id) {
+        const r = radiusScale(d.source.seqSupport)
+        return selfLoopTaperedPath(d, r * 2, r * 2, 0.4)
+      }
       return curvedTaperedLinkPath(d, 3, 1)
     })
     nodeSel.attr("transform", d => `translate(${d.x},${d.y})`)
@@ -839,11 +952,11 @@ function renderFa2Graph(data) {
       .on("mouseenter", (event, d) => {
         d3.select(event.currentTarget).style("cursor", "pointer")
         showTooltip(
-            `<b>class:</b> ${d.class}<br/><b>out-flow:</b> ${d.outFlow}<br/><b>in-flow:</b> ${d.inFlow}<br/>`,
+            `<b>state:</b> ${getDisplayToken(d.class, data.legend)}<br/><b>support:</b> ${d.seqSupport} seqs<br/><b>occurrences:</b> ${d.occurrences}<br/><b>out-flow:</b> ${d.outFlow}<br/><b>entropy:</b> ${d.entropy.toFixed(3)}<br/>`,
             event
         )
         // nodeSel.attr("opacity", n => (n.id === d.id ? 1 : 0.25))
-        linkSel.attr("opacity", l => (l.ensource.id === d.id || l.target.id === d.id) ? 1 : 0.01)
+        linkSel.attr("opacity", l => (l.source.id === d.id || l.target.id === d.id) ? 1 : 0.01)
       })
       .on("mouseleave", () => {
         hideTooltip()
@@ -852,16 +965,13 @@ function renderFa2Graph(data) {
       })
       .on("click", (event, d) => {
         event.stopPropagation()
-        const rid = regionStore.activeRegionId
-        const sourceRid = rid || "global"
-        if (!brushStore.canEditActiveBrushFromRegion(sourceRid)) return
-
-        if (rid) {
-          brushStore.setActivePanelRegion(rid, "region")
-        } else {
+        payloadStore.toggleFirstOrderState(String(d.class), "global")
+        if (brushStore.interactionMode === "brush") {
           brushStore.setActivePanelRegion("global", "global")
+          if (!brushStore.activeBrushId) brushStore.createBrush()
+          if (!brushStore.canEditActiveBrushFromRegion("global")) return
+          brushStore.addState(String(d.class))
         }
-        brushStore.toggleClass(String(d.class))
       })
 
   refresh()
@@ -1062,16 +1172,18 @@ function renderSequenceGraph(data) {
 <template>
   <div class="seq-view-wrapper">
     <div class="seq-toolbar">
+      <span v-if="props.fixedMode" class="fixed-view-title">{{ modeLabels[viewMode] }}</span>
       <select
+          v-else
           v-model="viewMode"
           class="view-select"
           @pointerdown="onViewSelectPointerDown"
           @change="onViewSelectChange"
           @blur="onViewSelectBlur"
       >
-        <option value="sequence">Sequence</option>
-        <option value="sankey">Sankey</option>
-        <option value="graph">Graph</option>
+        <option v-for="mode in availableModes" :key="mode" :value="mode">
+          {{ modeLabels[mode] }}
+        </option>
       </select>
     </div>
 
@@ -1097,7 +1209,7 @@ function renderSequenceGraph(data) {
 }
 
 .tooltip {
-  position: absolute;
+  position: fixed;
   pointer-events: none;
   background: rgba(255, 255, 255, 0.96);
   color: var(--text-main);
@@ -1110,7 +1222,7 @@ function renderSequenceGraph(data) {
   opacity: 0;
   transition: opacity 0.15s ease;
   white-space: nowrap;
-  z-index: 1000;
+  z-index: 100000;
 }
 .seq-toolbar {
   position: sticky;
@@ -1119,6 +1231,9 @@ function renderSequenceGraph(data) {
   z-index: 10;
   background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
   border-bottom: 1px solid var(--panel-border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .seq-toolbar .view-select {
@@ -1140,6 +1255,12 @@ function renderSequenceGraph(data) {
 .seq-toolbar .view-select:active {
   outline: 2px solid rgba(47, 111, 159, 0.18);
   background: #fff;
+}
+
+.fixed-view-title {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 </style>

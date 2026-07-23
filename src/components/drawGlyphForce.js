@@ -2,7 +2,7 @@ import * as d3 from "d3"
 
 /** 在容器 g 内绘制一个 glyph（扇形序列），使用给定的宽高与圆心半径 */
 function drawOneGlyph(g, ginfo, tokens, color, boxW, boxH, rMax = 12) {
-    const posDist = ginfo.position_distributions || []
+    const posDist = ginfo.position_distributions_full_order || ginfo.position_distributions || []
     const maxOrder = ginfo.max_order || 1
     const padding = 2
     const gap = 2

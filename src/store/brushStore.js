@@ -89,6 +89,10 @@ function normalizeStateKey(k) {
     return String(k).replace(/[()']/g, "").trim()
 }
 
+function isStateTransitionKey(k) {
+    return String(k).includes("→")
+}
+
 function normalizeLogic(logic) {
     return logic === "AND" ? "AND" : "OR"
 }
@@ -134,11 +138,13 @@ function brushSignature(b) {
         sourceRegionId: normalizeSourceId(b.sourceRegionId),
         classes: Array.from(b.classes || []).map(String).sort(),
         edges: Array.from(b.edges || []).map(String).sort(),
-        states: Array.from(b.states || []).map(normalizeStateKey).sort(),
+        states: Array.from(b.states || []).filter(state => !isStateTransitionKey(state)).map(normalizeStateKey).sort(),
+        stateTransitions: Array.from(b.states || []).filter(isStateTransitionKey).map(normalizeStateKey).sort(),
         groupLogic: {
             classes: b.groupLogic?.classes || "AND",
             edges: b.groupLogic?.edges || "AND",
             states: b.groupLogic?.states || "AND",
+            stateTransitions: b.groupLogic?.stateTransitions || "AND",
         }
     })
 }
@@ -183,6 +189,7 @@ export const useBrushStore = defineStore("brush", () => {
 
     // 当前激活画笔
     const activeBrushId = ref(null)
+    const interactionMode = ref("inspect")
 
     // ⭐ 新增：当前交互面板所属 region（全量图也算一个 region，例如 "root"）
     // 约定：全量图 panel 用 "root"（与你 regionStore 初始 root 一致）
@@ -211,6 +218,19 @@ export const useBrushStore = defineStore("brush", () => {
         count: 0,
         updatedAt: 0
     })
+
+    function clearPreview() {
+        preview.value = {
+            targetRid: null,
+            sourceRid: null,
+            brushId: null,
+            raw: null,
+            seqIds: null,
+            tok: null,
+            count: 0,
+            updatedAt: Date.now()
+        }
+    }
 
     // ⭐ 新增：sequence 索引缓存
     const sequenceIndexCache = ref({
@@ -311,17 +331,71 @@ export const useBrushStore = defineStore("brush", () => {
         }
     }
 
+    function buildSequenceIndexForPayload(payload) {
+        const rawSeqs = payload?.raw_sequences || []
+        const tokSeqs = payload?.first_order_sequences || []
+
+        const edgeToSeqIds = new Map()
+        const stateToSeqIds = new Map()
+        const seqHighlights = new Map()
+        const classToSeqIds = new Map()
+
+        for (let sid = 0; sid < rawSeqs.length; sid++) {
+            const raw = rawSeqs[sid] || []
+            const tok = tokSeqs[sid] || []
+            const nodes = []
+            const edges = []
+
+            for (let i = 0; i < raw.length; i++) {
+                const nodeKey = "node" + raw[i]
+                nodes.push(nodeKey)
+
+                if (i < raw.length - 1) {
+                    const edgeKey = `node${raw[i]}→node${raw[i + 1]}`
+                    edges.push(edgeKey)
+                    if (!edgeToSeqIds.has(edgeKey)) edgeToSeqIds.set(edgeKey, new Set())
+                    edgeToSeqIds.get(edgeKey).add(sid)
+                }
+            }
+
+            seqHighlights.set(sid, { nodes, edges })
+
+            new Set(raw.map(v => String(v))).forEach(cls => {
+                if (!classToSeqIds.has(cls)) classToSeqIds.set(cls, new Set())
+                classToSeqIds.get(cls).add(sid)
+            })
+
+            const tokens = tok.map(x => String(x).replace(/[()']/g, "").trim())
+            for (let i = 0; i < tokens.length; i++) {
+                let acc = tokens[i]
+                if (!stateToSeqIds.has(acc)) stateToSeqIds.set(acc, new Set())
+                stateToSeqIds.get(acc).add(sid)
+
+                for (let j = i + 1; j < tokens.length; j++) {
+                    acc += "→" + tokens[j]
+                    if (!stateToSeqIds.has(acc)) stateToSeqIds.set(acc, new Set())
+                    stateToSeqIds.get(acc).add(sid)
+                }
+            }
+        }
+
+        return {
+            built: true,
+            edgeToSeqIds,
+            stateToSeqIds,
+            classToSeqIds,
+            seqHighlights
+        }
+    }
+
     function genId() {
         return "brush_" + Math.random().toString(36).slice(2,9)
     }
 
-    let colorIndex = 0
-
     function randomColor() {
         const palette = d3.schemeTableau10
-        const c = palette[colorIndex % palette.length]
-        colorIndex++
-        return c
+        const used = new Set(Object.values(brushes.value).map(b => b.color))
+        return palette.find(c => !used.has(c)) || palette[Object.values(brushes.value).length % palette.length]
     }
 
     function nextBrushIndex() {
@@ -368,7 +442,8 @@ export const useBrushStore = defineStore("brush", () => {
             groupLogic: {
                 classes: "AND",
                 edges: "AND",
-                states: "AND"
+                states: "AND",
+                stateTransitions: "AND"
             },
 
             window: {
@@ -381,6 +456,14 @@ export const useBrushStore = defineStore("brush", () => {
         renumberBrushes()
 
         activeBrushId.value = id
+        interactionMode.value = "brush"
+    }
+
+    function setInteractionMode(mode) {
+        interactionMode.value = mode === "brush" ? "brush" : "inspect"
+        if (interactionMode.value === "brush" && !activeBrushId.value) {
+            createBrush()
+        }
     }
 
     function createBrushFromTemplate(templateId) {
@@ -401,7 +484,8 @@ export const useBrushStore = defineStore("brush", () => {
             groupLogic: {
                 classes: source.groupLogic?.classes || "AND",
                 edges: source.groupLogic?.edges || "AND",
-                states: source.groupLogic?.states || "AND"
+                states: source.groupLogic?.states || "AND",
+                stateTransitions: source.groupLogic?.stateTransitions || "AND"
             },
             window: {
                 prev: source.window?.prev ?? null,
@@ -513,9 +597,12 @@ export const useBrushStore = defineStore("brush", () => {
 
     function setSourcePreviewForBrush(b, sourceRid) {
         const sourceRegion = regionStore.regions[sourceRid]
+        const sourcePayload = sourceRegion?.modelPayload || payloadStore.payload
         const seqIds = sourceRid === "global"
             ? (payloadStore.payload?.raw_sequences || []).map((_, index) => index)
-            : [...(sourceRegion?.sequenceIds || [])]
+            : (sourceRegion?.modelPayload
+                ? (sourcePayload?.raw_sequences || []).map((_, index) => index)
+                : [...(sourceRegion?.sequenceIds || [])])
 
         preview.value = {
             targetRid: null,
@@ -524,6 +611,7 @@ export const useBrushStore = defineStore("brush", () => {
             raw: null,
             tok: null,
             seqIds,
+            usesLocalModel: Boolean(sourceRegion?.modelPayload),
             count: seqIds.length,
             updatedAt: Date.now()
         }
@@ -549,32 +637,33 @@ export const useBrushStore = defineStore("brush", () => {
     }
 
     function commitActiveBrushToRegionLocal() {
-
-        ensureSequenceIndex()
-
         const b = activeBrush.value
         if (!b) return
-
-
-
-        const cache = sequenceIndexCache.value
 
         const sourceRid = activePanelRegionId.value || "root"
         const sourceRegion = regionStore.regions[sourceRid]
         if (!sourceRegion) return
+
+        const sourcePayload = sourceRegion.modelPayload || payloadStore.payload
+        const cache = sourceRegion.modelPayload
+            ? buildSequenceIndexForPayload(sourcePayload)
+            : (ensureSequenceIndex(), sequenceIndexCache.value)
 
         const highlightNodes = new Set()
         const highlightEdges = new Set()
 
         const edges = b.edges || []
         const states = b.states
+        const stateValues = Array.from(states || []).filter(state => !isStateTransitionKey(state))
+        const stateTransitions = Array.from(states || []).filter(isStateTransitionKey)
         const classes = b.classes
 
         const hasEdges = edges.length > 0
-        const hasStates = states && states.size > 0
+        const hasStates = stateValues.length > 0
+        const hasStateTransitions = stateTransitions.length > 0
         const hasClasses = classes && classes.size > 0
 
-        if (!hasEdges && !hasStates && !hasClasses) {
+        if (!hasEdges && !hasStates && !hasStateTransitions && !hasClasses) {
             regionStore.setHighlightDataFast(sourceRid, highlightNodes, highlightEdges)
             setSourcePreviewForBrush(b, sourceRid)
             return
@@ -606,7 +695,13 @@ export const useBrushStore = defineStore("brush", () => {
 
         if (hasStates) {
             groupResults.push(
-                matchFilterGroup(states, groupLogic.states || "AND", cache.stateToSeqIds, normalizeStateKey)
+                matchFilterGroup(stateValues, groupLogic.states || "AND", cache.stateToSeqIds, normalizeStateKey)
+            )
+        }
+
+        if (hasStateTransitions) {
+            groupResults.push(
+                matchFilterGroup(stateTransitions, groupLogic.stateTransitions || "AND", cache.stateToSeqIds, normalizeStateKey)
             )
         }
 
@@ -648,6 +743,7 @@ export const useBrushStore = defineStore("brush", () => {
             raw: null,
             tok: null,
             seqIds: matchedSeqIds,
+            usesLocalModel: Boolean(sourceRegion.modelPayload),
             count: matchedSeqIds.length,
             updatedAt: Date.now()
         }
@@ -666,15 +762,23 @@ export const useBrushStore = defineStore("brush", () => {
         const sourceRegion = regionStore.regions[sourceRid]
         if (!sourceRegion) return
 
+        if (sourceRegion.modelPayload) {
+            commitActiveBrushToRegionLocal()
+            return
+        }
+
         const edges = b.edges || []
         const states = b.states
+        const stateValues = Array.from(states || []).filter(state => !isStateTransitionKey(state))
+        const stateTransitions = Array.from(states || []).filter(isStateTransitionKey)
         const classes = b.classes
 
         const hasEdges = edges.length > 0
-        const hasStates = states && states.size > 0
+        const hasStates = stateValues.length > 0
+        const hasStateTransitions = stateTransitions.length > 0
         const hasClasses = classes && classes.size > 0
 
-        if (!hasEdges && !hasStates && !hasClasses) {
+        if (!hasEdges && !hasStates && !hasStateTransitions && !hasClasses) {
             regionStore.setHighlightDataFast(sourceRid, new Set(), new Set())
             setSourcePreviewForBrush(b, sourceRid)
             return
@@ -692,11 +796,13 @@ export const useBrushStore = defineStore("brush", () => {
                 body: JSON.stringify({
                     edges: edges,
                     classes: Array.from(classes || []),
-                    states: Array.from(states || []),
+                    states: stateValues,
+                    state_transitions: stateTransitions,
                     group_logic: {
                         classes: b.groupLogic?.classes || "AND",
                         edges: b.groupLogic?.edges || "AND",
-                        states: b.groupLogic?.states || "AND"
+                        states: b.groupLogic?.states || "AND",
+                        stateTransitions: b.groupLogic?.stateTransitions || "AND"
                     },
                     source_seq_ids: sourceSeqIds
                 })
@@ -840,7 +946,7 @@ export const useBrushStore = defineStore("brush", () => {
             b.classes.delete(String(value))
         } else if (groupKey === "edges") {
             b.edges = (b.edges || []).filter(edge => edge !== value)
-        } else if (groupKey === "states") {
+        } else if (groupKey === "states" || groupKey === "stateTransitions") {
             b.states.delete(String(value))
         }
 
@@ -856,7 +962,9 @@ export const useBrushStore = defineStore("brush", () => {
         } else if (groupKey === "edges") {
             b.edges = []
         } else if (groupKey === "states") {
-            b.states = new Set()
+            b.states = new Set(Array.from(b.states || []).filter(isStateTransitionKey))
+        } else if (groupKey === "stateTransitions") {
+            b.states = new Set(Array.from(b.states || []).filter(state => !isStateTransitionKey(state)))
         }
 
         commitActiveBrushToRegion()
@@ -898,15 +1006,22 @@ export const useBrushStore = defineStore("brush", () => {
         const rid = targetRegionId || regionStore.activeRegionId
         if (!rid) return
 
-        const fullRaw = payloadStore.payload?.raw_sequences || []
-        const fullTok = payloadStore.payload?.first_order_sequences || []
+        const sourceRegion = regionStore.regions[p.sourceRid]
+        const sourcePayload = sourceRegion?.modelPayload || payloadStore.payload
+        const fullRaw = sourcePayload?.raw_sequences || []
+        const fullTok = sourcePayload?.first_order_sequences || []
         const ids = p.seqIds || []
         const raw = ids.map(sid => fullRaw[sid]).filter(Boolean)
         const tok = ids.map(sid => fullTok[sid]).filter(Boolean)
 
         regionStore.setBaseSequencesFast(rid, raw, tok, ids)
+        if (sourceRegion?.modelPayload && Array.isArray(sourceRegion.globalSeqIds)) {
+            const target = regionStore.regions[rid]
+            if (target) {
+                target.globalSeqIds = ids.map(sid => sourceRegion.globalSeqIds[sid]).filter(v => v != null)
+            }
+        }
 
-        const sourceRegion = regionStore.regions[p.sourceRid]
         const sourceInfoValue =
             p.sourceRid === "global" ? "global" : (sourceRegion?.brushId ?? null)
 
@@ -919,8 +1034,10 @@ export const useBrushStore = defineStore("brush", () => {
         if (!p) return
 
         const regionStore = useRegionStore()
-        const fullRaw = payloadStore.payload?.raw_sequences || []
-        const fullTok = payloadStore.payload?.first_order_sequences || []
+        const sourceRegion = regionStore.regions[p.sourceRid]
+        const sourcePayload = sourceRegion?.modelPayload || payloadStore.payload
+        const fullRaw = sourcePayload?.raw_sequences || []
+        const fullTok = sourcePayload?.first_order_sequences || []
         const ids = p.seqIds || []
         const raw = ids.map(sid => fullRaw[sid]).filter(Boolean)
         const tok = ids.map(sid => fullTok[sid]).filter(Boolean)
@@ -932,7 +1049,12 @@ export const useBrushStore = defineStore("brush", () => {
             ids
         )
 
-        const sourceRegion = regionStore.regions[p.sourceRid]
+        if (sourceRegion?.modelPayload && Array.isArray(sourceRegion.globalSeqIds)) {
+            const target = regionStore.regions[targetRid]
+            if (target) {
+                target.globalSeqIds = ids.map(sid => sourceRegion.globalSeqIds[sid]).filter(v => v != null)
+            }
+        }
 
         let sourceInfoValue;
 
@@ -959,6 +1081,8 @@ export const useBrushStore = defineStore("brush", () => {
         setActivePanelRegion,
         canEditActiveBrushFromRegion,
         activeRegionForBrush,
+        interactionMode,
+        setInteractionMode,
 
         createBrush,
         createBrushFromTemplate,
@@ -981,6 +1105,7 @@ export const useBrushStore = defineStore("brush", () => {
 
         // 点击了之后才画图
         preview,
+        clearPreview,
         applyPreviewToSelectedRegion,
         applyPreviewToRegion,
     }

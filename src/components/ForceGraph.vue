@@ -5,6 +5,7 @@ import {entropyFromLinks} from "./tool.js";
 import { useRegionStore } from "@/store/regionStore.js"  // ⭐ 新增
 
 import {
+  applyLayeredLayout,
   computeLayerMap,
   selfLoopTaperedPath,
   curvedTaperedLinkPath
@@ -22,8 +23,10 @@ import forceAtlas2 from "graphology-layout-forceatlas2";
 
 const props = defineProps({
   externalSequences: Array,
+  payloadData: Object,
   regionId: String,
   sourceRegionId: String,   // ⭐ 新增
+  overlayBaseRegionId: String,
 })
 
 /* ===============================
@@ -33,7 +36,9 @@ const props = defineProps({
 const svgRef = ref(null)
 const nodeSelRef = ref(null)
 const linkSelRef = ref(null)
+const linkLineSelRef = ref(null)
 const tooltipRef = ref(null)
+const noVisibleNodes = ref(false)
 // ⭐ 新增这一行
 const updateHighlightStylesFn = ref(null)
 
@@ -49,16 +54,72 @@ function edgeKey(d) {
   return `${d.source.id}→${d.target.id}`
 }
 
+function toGraphNodeId(v) {
+  if (v == null) return null
+  const s = String(v)
+  return s.startsWith("node") ? s : `node${s}`
+}
+
+function shortList(list, n = 8) {
+  return Array.isArray(list) ? list.slice(0, n) : []
+}
+
 function showTooltip(html, event) {
   const el = d3.select(tooltipRef.value)
   el.html(html)
-      .style("left", event.offsetX + 12 + "px")
-      .style("top", event.offsetY + 12 + "px")
+      .style("left", event.clientX + 12 + "px")
+      .style("top", event.clientY + 12 + "px")
       .style("opacity", 1)
 }
 
 function hideTooltip() {
   d3.select(tooltipRef.value).style("opacity", 0)
+}
+
+function currentPayloadData() {
+  return props.payloadData || payloadStore.payload
+}
+
+function resolveNodeOverlaps(nodes, nodeW, nodeH, padX = 8, padY = 6, iterations = 80) {
+  if (!Array.isArray(nodes) || nodes.length < 2) return
+
+  const halfW = nodeW / 2
+  const halfH = nodeH / 2
+  for (let it = 0; it < iterations; it++) {
+    let moved = false
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i]
+        const b = nodes[j]
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) {
+          const angle = ((i * 928371 + j * 364479) % 360) * Math.PI / 180
+          dx = Math.cos(angle) * 0.01
+          dy = Math.sin(angle) * 0.01
+        }
+        const minDx = halfW * 2 + padX
+        const minDy = halfH * 2 + padY
+        const overlapX = minDx - Math.abs(dx)
+        const overlapY = minDy - Math.abs(dy)
+        if (overlapX <= 0 || overlapY <= 0) continue
+
+        if (overlapX < overlapY) {
+          const sign = dx >= 0 ? 1 : -1
+          const push = overlapX / 2 + 0.1
+          a.x -= sign * push
+          b.x += sign * push
+        } else {
+          const sign = dy >= 0 ? 1 : -1
+          const push = overlapY / 2 + 0.1
+          a.y -= sign * push
+          b.y += sign * push
+        }
+        moved = true
+      }
+    }
+    if (!moved) break
+  }
 }
 
 /* ===============================
@@ -79,21 +140,87 @@ function buildEdgeCountFromSeqs(seqs) {
   return m
 }
 
+function buildNodeCountFromSeqs(seqs) {
+  const m = new Map()
+  if (!Array.isArray(seqs)) return m
+  for (const seq of seqs) {
+    if (!Array.isArray(seq)) continue
+    for (const v of seq) {
+      const k = `node${v}`
+      m.set(k, (m.get(k) || 0) + 1)
+    }
+  }
+  return m
+}
+
+function getRegionSequences(regionId, payload, fallback = []) {
+  const pl = payload || payloadStore.payload
+  const region = regionStore.regions[regionId]
+  if (!region) return fallback
+
+  if (Array.isArray(region.sequences) && region.sequences.length > 0) {
+    return region.sequences
+  }
+  if (Array.isArray(region.baseRawSeqs) && region.baseRawSeqs.length > 0) {
+    return region.baseRawSeqs
+  }
+  if (Array.isArray(region.sequenceIds) && region.sequenceIds.length > 0) {
+    const fullRaw = pl?.raw_sequences || []
+    return region.sequenceIds.map(i => fullRaw[i]).filter(Boolean)
+  }
+  return fallback
+}
+
+function mergeSequencesForOverlay(targetSeqs, baseSeqs) {
+  const seen = new Set()
+  const merged = []
+  for (const seq of [...(targetSeqs || []), ...(baseSeqs || [])]) {
+    if (!Array.isArray(seq)) continue
+    const key = JSON.stringify(seq)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(seq)
+  }
+  return merged
+}
+
+function hasVisibleHighOrderStates(glyph, cls) {
+  const g = glyph?.[String(cls)]
+  if (!g) return false
+  if (Array.isArray(g.full_order_states)) return g.full_order_states.length > 0
+  return (g.unique_states || []).length > 0
+}
+
 let edgeCountBeforeCache = new Map()
 let edgeCountAfterCache = new Map()
+let nodeCountBeforeCache = new Map()
+let nodeCountAfterCache = new Map()
 let hasBeforeEdgeCountCache = false
 
-function refreshEdgeCountCaches(data) {
+function refreshEdgeCountCaches(data, afterSequences = null) {
   const pl = data || payloadStore.payload
   if (!pl) {
     edgeCountBeforeCache = new Map()
     edgeCountAfterCache = new Map()
+    nodeCountBeforeCache = new Map()
+    nodeCountAfterCache = new Map()
     hasBeforeEdgeCountCache = false
     return
   }
-  const seqs = props.externalSequences ?? pl.raw_sequences ?? []
+  const seqs = afterSequences ?? props.externalSequences ?? pl.raw_sequences ?? []
   const ridForCounts = props.regionId
   const regionForCounts = regionStore.regions[ridForCounts]
+
+  if (props.overlayBaseRegionId) {
+    const beforeSequences = getRegionSequences(props.overlayBaseRegionId, pl, [])
+    edgeCountAfterCache = buildEdgeCountFromSeqs(seqs)
+    edgeCountBeforeCache = buildEdgeCountFromSeqs(beforeSequences)
+    nodeCountAfterCache = buildNodeCountFromSeqs(seqs)
+    nodeCountBeforeCache = buildNodeCountFromSeqs(beforeSequences)
+    hasBeforeEdgeCountCache = edgeCountBeforeCache.size > 0 || nodeCountBeforeCache.size > 0
+    return
+  }
+
   // “过滤前”来源必须稳定：优先使用该 region 已保存的 sourceRegionId（apply 时写入）
   // preview 是全局单例，可能来自其它 panel 的交互；只有当 activePanelRegionId 命中本 panel 时才可用
   const previewObj =
@@ -129,18 +256,21 @@ function refreshEdgeCountCaches(data) {
   }
   edgeCountAfterCache = buildEdgeCountFromSeqs(seqs)
   edgeCountBeforeCache = buildEdgeCountFromSeqs(beforeSequences)
-  hasBeforeEdgeCountCache = edgeCountBeforeCache.size > 0
+  nodeCountAfterCache = buildNodeCountFromSeqs(seqs)
+  nodeCountBeforeCache = buildNodeCountFromSeqs(beforeSequences)
+  hasBeforeEdgeCountCache = edgeCountBeforeCache.size > 0 || nodeCountBeforeCache.size > 0
 }
 
 function patchHighlightMetricsOnly() {
-  refreshEdgeCountCaches(payloadStore.payload)
+  refreshEdgeCountCaches(currentPayloadData())
   updateHighlightStylesFn.value?.()
 }
 
 // 首次渲染
 onMounted(() => {
-  if (payloadStore.payload) {
-    renderGraph(payloadStore.payload)
+  const data = currentPayloadData()
+  if (data) {
+    renderGraph(data)
   }
 })
 
@@ -180,7 +310,36 @@ watch(
         }
       }
 
-      renderGraph(payloadStore.payload)
+      const data = currentPayloadData()
+      if (!data) return
+      renderGraph(data)
+    }
+)
+
+watch(
+    () => props.overlayBaseRegionId,
+    () => {
+      const data = currentPayloadData()
+      if (!data) return
+      renderGraph(data)
+    }
+)
+
+watch(
+    () => props.payloadData,
+    () => {
+      const data = currentPayloadData()
+      if (!data) return
+      renderGraph(data)
+    }
+)
+
+watch(
+    () => payloadStore.highOrderLayoutMode,
+    () => {
+      const data = currentPayloadData()
+      if (!data) return
+      renderGraph(data)
     }
 )
 
@@ -188,6 +347,9 @@ watch(
 watch(
     () => [
       regionStore.regions[props.regionId]?.sourceRegionId,
+      props.overlayBaseRegionId,
+      regionStore.overlay?.baseRegionId,
+      regionStore.overlay?.targetRegionId,
       brushStore.preview?.sourceRid,
       brushStore.preview?.updatedAt
     ],
@@ -204,6 +366,17 @@ let currentSimulation = null; // 顶层引用
 function renderGraph(data) {
   let hoverNodeId = null
   let hoverEdgeKey = null
+  noVisibleNodes.value = false
+
+  const measuredWidth = svgRef.value?.clientWidth || 0
+  const measuredHeight = svgRef.value?.clientHeight || 0
+  if (measuredWidth < 80 || measuredHeight < 80) {
+    requestAnimationFrame(() => {
+      const latest = currentPayloadData()
+      if (latest) renderGraph(latest)
+    })
+    return
+  }
 
   // 1. 杀掉旧的物理引擎
   if (currentSimulation) {
@@ -218,12 +391,18 @@ function renderGraph(data) {
   const glyph = data.glyph
   const legend = data.legend
 
-  // ✅ sequences 来源
-  const sequences =
+  // ✅ sequences 来源；overlay 时显示 target/base 的 union，保证 A > B 的边也能显示
+  const targetSequences =
       props.externalSequences ??
       data.raw_sequences
+  const overlayBaseSequences = props.overlayBaseRegionId
+      ? getRegionSequences(props.overlayBaseRegionId, data, [])
+      : []
+  const sequences = props.overlayBaseRegionId
+      ? mergeSequencesForOverlay(targetSequences, overlayBaseSequences)
+      : targetSequences
 
-  refreshEdgeCountCaches(data)
+  refreshEdgeCountCaches(data, targetSequences)
 
   // 同时支持 0 和 "node0"
   const activeNodeSet = new Set()
@@ -235,12 +414,15 @@ function renderGraph(data) {
     })
   })
 
-  const width = svgRef.value.clientWidth
-  const height = svgRef.value.clientHeight
+  const width = measuredWidth
+  const height = measuredHeight
 
-  // 子图不再复用全局图坐标：始终使用当前子图自己的 FA2 布局
-  const posById = null
-  const useGlobalLayout = false
+  // 普通子图复用全局图坐标，便于用户对照同一批 HON 节点；
+  // re-aggregate 后的本地模型节点语义已经改变，必须重新布局。
+  const isLocalModel = Boolean(props.payloadData)
+  const useLayeredLayout = payloadStore.highOrderLayoutMode === "layered"
+  const posById = !isLocalModel ? (payloadStore.globalGraphNodePositions || null) : null
+  const useGlobalLayout = !useLayeredLayout && !isLocalModel && posById && Object.keys(posById).length > 0
 
   const root = svg.append("g")
 
@@ -269,31 +451,110 @@ function renderGraph(data) {
 
   // sequences 里出现过的 node id
   const nodes = data.graph.nodes
-      .filter(d => activeNodeSet.has(d.id) || activeNodeSet.has(String(d.id)))
+      .filter(d =>
+          (activeNodeSet.has(d.id) || activeNodeSet.has(String(d.id))) &&
+          hasVisibleHighOrderStates(glyph, d.class)
+      )
       .map(d => ({ ...d }))
+  const visibleNodeIds = new Set(nodes.map(d => String(d.id)))
+  if (nodes.length === 0) {
+    noVisibleNodes.value = true
+    return
+  }
 
   const linkMap = new Map()
+  const rejectedLinks = []
+  const addVisibleLink = (source, target, value = 1, { onlyIfMissing = false } = {}) => {
+    const s = toGraphNodeId(source)
+    const t = toGraphNodeId(target)
+    if (!s || !t) {
+      rejectedLinks.push({ source, target, reason: "empty endpoint" })
+      return
+    }
+    if (!visibleNodeIds.has(s) || !visibleNodeIds.has(t)) {
+      rejectedLinks.push({
+        source,
+        target,
+        normalizedSource: s,
+        normalizedTarget: t,
+        reason: "endpoint not visible"
+      })
+      return
+    }
+    const k = `${s}→${t}`
+    if (onlyIfMissing && linkMap.has(k)) return
+    if (!linkMap.has(k)) {
+      linkMap.set(k, {
+        source: s,
+        target: t,
+        value: 0
+      })
+    }
+    linkMap.get(k).value += Number(value) || 1
+  }
 
-  sequences.forEach(seq => {
-    for (let i = 0; i < seq.length - 1; i++) {
+  const graphLinks = Array.isArray(graph?.links) ? graph.links : []
+  const visibleSequenceSamples = []
+  if (isLocalModel && graphLinks.length > 0) {
+    graphLinks.forEach(l => addVisibleLink(l.source, l.target, l.value))
+  }
 
-      const s = `node${seq[i]}`
-      const t = `node${seq[i+1]}`
-      const k = `${s}→${t}`
-
-      if (!linkMap.has(k)) {
-        linkMap.set(k, {
-          source: s,
-          target: t,
-          value: 0
+  // Re-aggregate 会隐藏 warm-up(-1) 节点；若直接按原序列相邻点画边，很多边会被 -1 吃掉。
+  // 这里在本地模型中跳过不可见节点，补齐相邻可见高阶聚合节点之间的边。
+  if (isLocalModel) {
+    sequences.forEach((seq, seqIndex) => {
+      const visibleSeq = []
+      for (const v of seq || []) {
+        const id = toGraphNodeId(v)
+        if (id && visibleNodeIds.has(id)) visibleSeq.push(id)
+      }
+      if (visibleSequenceSamples.length < 6) {
+        visibleSequenceSamples.push({
+          seqIndex,
+          raw: shortList(seq, 12),
+          visible: shortList(visibleSeq, 12),
+          rawLength: Array.isArray(seq) ? seq.length : 0,
+          visibleLength: visibleSeq.length
         })
       }
-
-      linkMap.get(k).value += 1
-    }
-  })
+      for (let i = 0; i < visibleSeq.length - 1; i++) {
+        addVisibleLink(visibleSeq[i], visibleSeq[i + 1], 1, { onlyIfMissing: true })
+      }
+    })
+  } else {
+    sequences.forEach(seq => {
+      for (let i = 0; i < seq.length - 1; i++) {
+        addVisibleLink(seq[i], seq[i + 1], 1)
+      }
+    })
+  }
 
   const links = Array.from(linkMap.values())
+
+  if (isLocalModel) {
+    const duplicateEdgeKeys = links
+        .map(l => `${l.source}→${l.target}`)
+        .filter((key, index, arr) => arr.indexOf(key) !== index)
+    const edgeBuildDebug = {
+      regionId: props.regionId || "unknown",
+      modelInfo: props.payloadData?.model_info || null,
+      graphNodes: data.graph?.nodes?.length || 0,
+      visibleNodes: nodes.length,
+      visibleNodeIds: shortList(Array.from(visibleNodeIds), 20),
+      sequenceCount: Array.isArray(sequences) ? sequences.length : 0,
+      sequenceSamples: visibleSequenceSamples,
+      graphLinks: graphLinks.length,
+      finalVisibleLinks: links.length,
+      duplicateEdgeKeys: shortList(duplicateEdgeKeys, 12),
+      finalSamples: shortList(links, 12),
+      rejectedCount: rejectedLinks.length,
+      rejectedSamples: shortList(rejectedLinks, 12)
+    }
+    console.log(`[ForceGraph Debug JSON] edge-build ${JSON.stringify(edgeBuildDebug)}`)
+    if (links.length === 0) {
+      console.warn(`[ForceGraph Debug Warning] region=${props.regionId || "unknown"} finalVisibleLinks=0`, edgeBuildDebug)
+    }
+  }
 
 
   /* ===============================
@@ -321,6 +582,10 @@ function renderGraph(data) {
     n.inFlow  = d3.sum(inMap.get(n.id)||[],d=>d.value)
     n.entropy = entropyFromLinks(outLs)
   })
+
+  const maxEntropy = d3.max(nodes, d => d.entropy) || 1
+  const entropyColor = d3.scaleSequential(d3.interpolateYlOrRd)
+      .domain([0, maxEntropy])
 
   const outDegrees = nodes.map(
       d => outMap.get(d.id)?.length || 0
@@ -388,6 +653,7 @@ function renderGraph(data) {
       .clamp(true)
 
   const linkSel = root.append("g")
+      .attr("class", "edge-fill-layer")
       .selectAll("path")
       .data(links)
       .enter()
@@ -411,8 +677,16 @@ function renderGraph(data) {
       .attr("opacity", d => {
         return linkOpacity(d.value)})
 
+  // Keep one visual mark per logical edge. The tapered path already encodes the
+  // edge body; drawing an additional center line makes a single aggregated edge
+  // look like multiple parallel edges between the same two nodes.
+  const linkLineSel = root.append("g")
+      .attr("class", "edge-stroke-layer")
+      .selectAll("path")
+      .data([])
 
   linkSelRef.value = linkSel
+  linkLineSelRef.value = linkLineSel
 
   /* ===============================
    * brush click
@@ -435,10 +709,10 @@ function renderGraph(data) {
       .on("click",(event,d)=>{
         // 标明我在对哪个子图进行brush
         event.stopPropagation()
-        if(!brushStore.activeBrushId) return
-        if (!brushStore.canEditActiveBrushFromRegion(props.regionId)) return
-
+        if (brushStore.interactionMode !== "brush") return
         brushStore.setActivePanelRegion(props.regionId, "region")
+        if(!brushStore.activeBrushId) brushStore.createBrush()
+        if (!brushStore.canEditActiveBrushFromRegion(props.regionId)) return
 
         brushStore.toggleEdge(
             brushStore.activeBrushId,
@@ -493,11 +767,16 @@ function renderGraph(data) {
       })
       .on("click", (event, d) => {
         event.stopPropagation()
-        if (!brushStore.canEditActiveBrushFromRegion(props.regionId)) return
-
-        brushStore.setActivePanelRegion(props.regionId, "region")
-        // toggleClass 内部已触发 commit，避免重复提交导致异步返回乱序覆盖高亮
-        brushStore.toggleClass(String(d.class))
+        if (props.regionId && regionStore.activeRegionId !== props.regionId) {
+          regionStore.setActive(props.regionId)
+        }
+        payloadStore.toggleHighOrderClass(String(d.class), props.regionId || "global")
+        if (brushStore.interactionMode === "brush") {
+          brushStore.setActivePanelRegion(props.regionId, "region")
+          if (!brushStore.activeBrushId) brushStore.createBrush()
+          if (!brushStore.canEditActiveBrushFromRegion(props.regionId)) return
+          brushStore.addClass(String(d.class))
+        }
       })
 
   nodeSel.append("rect")
@@ -507,7 +786,8 @@ function renderGraph(data) {
       .attr("height",NODE_H)
       .attr("rx",6)
       .attr("fill","#f5f5f5")
-      .attr("stroke","#999")
+      .attr("stroke", d => entropyColor(d.entropy))
+      .attr("stroke-width", d => 0.9 + d.entropy * 1.4)
 
   nodeSel.append("text")
       .attr("x",-NODE_W/2-6)
@@ -551,6 +831,14 @@ function renderGraph(data) {
   * ForceAtlas2 布局（Gephi style）
   * =============================== */
   if (!usedGlobalLayout) {
+    if (useLayeredLayout) {
+      applyLayeredLayout(nodes, links, {
+        nodeW: NODE_W * 0.62,
+        nodeH: NODE_H,
+        ranksep: 18,
+        nodesep: 14,
+      })
+    } else {
     const g = new Graph({
       multi: true,
       type: "directed",
@@ -559,7 +847,7 @@ function renderGraph(data) {
 
   const xNorm = d3.scaleLinear()
       .domain([0, maxLayer])
-      .range([-500, 500])   // ⭐ 不再是 0~1
+      .range([-500, 500])
 
   /* -------------------------------
    * 初始化位置（Gephi风格）
@@ -628,7 +916,7 @@ function renderGraph(data) {
     outboundAttractionDistribution: true,  // ✅ 这个正确
     adjustSizes: true,  // true ❌ 先关闭
     gravity: 1,  // Gephi默认是1 ✅
-    scalingRatio: 1500 *  500/Math.pow(nodes.length, 2),   // 10 ❌ 太大导致过于分散
+    scalingRatio: 2000 * (20 / Math.max(nodes.length, 1)),
     strongGravityMode: true,  // false ❌ 打开强引力让节点向中心聚集
     slowDown: 1,  // 10 ❌ 太大导致移动太慢
     barnesHutOptimize: true,
@@ -654,6 +942,7 @@ function renderGraph(data) {
       n.x = g.getNodeAttribute(n.id, "x")
       n.y = g.getNodeAttribute(n.id, "y")
     })
+    }
   }
 
 
@@ -685,7 +974,7 @@ function renderGraph(data) {
   const layoutW = (maxX - minX) || 1
   const layoutH = (maxY - minY) || 1
 
-  const scale = 1
+  const scale = useLayeredLayout ? 0.52 : 1
 
   nodes.forEach(n => {
 
@@ -705,21 +994,44 @@ function renderGraph(data) {
         (availableH - layoutH * scale) / 2
 
   })
+
+  resolveNodeOverlaps(
+      nodes,
+      NODE_W,
+      NODE_H,
+      8,
+      6,
+      Math.min(520, Math.max(80, nodes.length * 5))
+  )
   /* -------------------------------
    * 写回 link
    * ------------------------------- */
 
+  const missingMappedLinks = []
   links.forEach(l => {
 
     l.source = nodeById.get(getId(l.source))
     l.target = nodeById.get(getId(l.target))
+    if (!l.source || !l.target) {
+      missingMappedLinks.push({
+        source: getId(l.source),
+        target: getId(l.target),
+        value: l.value
+      })
+    }
 
   })
+  if (isLocalModel && missingMappedLinks.length > 0) {
+    console.warn(`[ForceGraph Debug] region=${props.regionId || "unknown"} links missing node objects`, shortList(missingMappedLinks, 12))
+  }
 
   function refreshPositions() {
     const getX = (n) => (n.fx != null ? n.fx : n.x)
     const getY = (n) => (n.fy != null ? n.fy : n.y)
+    let fillPathCount = 0
+    let linePathCount = 0
     linkSel.attr("d", d => {
+      if (!d.source || !d.target) return ""
       const sid = d.source.id
       const tid = d.target.id
       const d2 = {
@@ -728,13 +1040,35 @@ function renderGraph(data) {
         target: { ...d.target, x: getX(d.target), y: getY(d.target) }
       }
       if (sid === tid) return selfLoopTaperedPath(d2, NODE_W, NODE_H)
-      return curvedTaperedLinkPath(d2, 3, 1)
+      const path = curvedTaperedLinkPath(d2, 3, 1)
+      if (path && !path.includes("NaN")) fillPathCount++
+      return path
     })
+    linkLineSel.attr("d", () => "")
     nodeSel.attr("transform", d => {
       const x = getX(d)
       const y = getY(d)
       return `translate(${x},${y})`
     })
+    if (isLocalModel) {
+      const renderDebug = {
+        regionId: props.regionId || "unknown",
+        links: links.length,
+        fillPathCount,
+        linePathCount,
+        edgeFillDomCount: linkSel.size(),
+        edgeLineDomCount: linkLineSel.size(),
+        firstNodePositions: shortList(nodes.map(n => ({
+          id: n.id,
+          x: Number.isFinite(n.x) ? Number(n.x.toFixed(2)) : n.x,
+          y: Number.isFinite(n.y) ? Number(n.y.toFixed(2)) : n.y
+        })), 8)
+      }
+      console.log(`[ForceGraph Debug JSON] rendered-paths ${JSON.stringify(renderDebug)}`)
+      if (links.length > 0 && linePathCount === 0 && fillPathCount === 0) {
+        console.warn(`[ForceGraph Debug Warning] region=${props.regionId || "unknown"} links exist but no paths rendered`, renderDebug)
+      }
+    }
   }
   refreshPositions()
 
@@ -784,6 +1118,20 @@ function renderGraph(data) {
             ? (brushStore.brushes?.[sourceBrushId]?.color || null)
             : null
 
+    const isOverlayMode = Boolean(props.overlayBaseRegionId)
+    const overlayBaseRegion = props.overlayBaseRegionId
+        ? regionStore.regions[props.overlayBaseRegionId]
+        : null
+    const overlayTargetRegion = regionStore.regions[props.regionId]
+    const overlayBaseColor =
+        overlayBaseRegion?.brushId
+            ? (brushStore.brushes?.[overlayBaseRegion.brushId]?.color || "#9a3340")
+            : "#9a3340"
+    const overlayTargetColor =
+        overlayTargetRegion?.brushId
+            ? (brushStore.brushes?.[overlayTargetRegion.brushId]?.color || regionBrushColor || "#2f6f9f")
+            : (regionBrushColor || "#2f6f9f")
+
     // diffOpacity：用 |过滤前 - 过滤后| 反映差值大小
     let maxAbsDiff = 0
     const allEdgeKeys = new Set([
@@ -792,6 +1140,14 @@ function renderGraph(data) {
     ])
     allEdgeKeys.forEach((k) => {
       const absDiff = Math.abs((edgeCountBeforeCache.get(k) || 0) - (edgeCountAfterCache.get(k) || 0))
+      if (absDiff > maxAbsDiff) maxAbsDiff = absDiff
+    })
+    const allNodeKeys = new Set([
+      ...nodeCountBeforeCache.keys(),
+      ...nodeCountAfterCache.keys()
+    ])
+    allNodeKeys.forEach((k) => {
+      const absDiff = Math.abs((nodeCountBeforeCache.get(k) || 0) - (nodeCountAfterCache.get(k) || 0))
       if (absDiff > maxAbsDiff) maxAbsDiff = absDiff
     })
 
@@ -804,6 +1160,20 @@ function renderGraph(data) {
     const getAfter = (k) => edgeCountAfterCache.get(k) || 0
     const getDiff = (k) => getAfter(k) - getBefore(k)
     const getAbsDiff = (k) => Math.abs(getDiff(k))
+    const getNodeBefore = (k) => nodeCountBeforeCache.get(k) || 0
+    const getNodeAfter = (k) => nodeCountAfterCache.get(k) || 0
+    const getNodeDiff = (k) => getNodeAfter(k) - getNodeBefore(k)
+    const getNodeAbsDiff = (k) => Math.abs(getNodeDiff(k))
+    const pickOverlayColor = (diff, absDiff) => {
+      if (diff === 0) return "#b8bec6"
+      const baseColor = diff > 0 ? overlayTargetColor : overlayBaseColor
+      const lightColor = d3.hsl(baseColor).brighter(1.25).formatRgb()
+      return d3.scalePow()
+          .exponent(0.8)
+          .domain([0, maxAbsDiff || 1])
+          .range([lightColor, baseColor])
+          .clamp(true)(absDiff)
+    }
     const pickHighlightColor = (k, fallback) => {
       const before = getBefore(k)
       const after = getAfter(k)
@@ -825,12 +1195,51 @@ function renderGraph(data) {
       return diffColor(getAbsDiff(k))
     }
 
+    if (isOverlayMode) {
+      nodeSel.select("rect")
+          .attr("stroke", d => {
+            const diff = getNodeDiff(d.id)
+            return pickOverlayColor(diff, Math.abs(diff))
+          })
+          .attr("stroke-width", d => {
+            const absDiff = getNodeAbsDiff(d.id)
+            return absDiff === 0 ? 1 : 1 + Math.min(2.5, diffOpacity(absDiff) * 2.5)
+          })
+
+      linkSel
+          .attr("opacity", d => {
+            const absDiff = getAbsDiff(edgeKey(d))
+            return diffOpacity(absDiff)
+          })
+          .attr("fill", d => {
+            const sid = d.source
+            const tid = d.target
+            if (sid === tid) return "none"
+            const k = edgeKey(d)
+            return pickOverlayColor(getDiff(k), getAbsDiff(k))
+          })
+          .attr("stroke", d => {
+            const sid = d.source
+            const tid = d.target
+            if (sid !== tid) return "none"
+            const k = edgeKey(d)
+            return pickOverlayColor(getDiff(k), getAbsDiff(k))
+          })
+      linkLineSel
+          .attr("opacity", d => diffOpacity(getAbsDiff(edgeKey(d))))
+          .attr("stroke", d => {
+            const k = edgeKey(d)
+            return pickOverlayColor(getDiff(k), getAbsDiff(k))
+          })
+      return
+    }
+
     nodeSel.select("rect")
         .attr("stroke", d => {
-          if (!active) return "#aaa"
-          if (!highlightNodes) return "#aaa"
+          if (!active) return entropyColor(d.entropy)
+          if (!highlightNodes) return entropyColor(d.entropy)
           const hit = highlightNodes.has(d.id)
-          return hit ? active.color : "#aaa"
+          return hit ? active.color : entropyColor(d.entropy)
         })
         .attr("stroke-width", d => {
           if (hasHighlight && highlightNodes.has(d.id))
@@ -839,7 +1248,7 @@ function renderGraph(data) {
           if (!hasHighlight && hoverNodeId === d.id)
             return 1.5
 
-          return 1
+          return 0.9 + d.entropy * 1.4
         })
 
     // 边
@@ -890,6 +1299,32 @@ function renderGraph(data) {
           return sid === tid
               ? pickHighlightColor(k, linkColor(d.value))
               : "none"
+        })
+
+    linkLineSel
+        .attr("opacity", d => {
+          const k = edgeKey(d)
+          if (hasEdgeHighlight) {
+            if (!highlightEdges.has(k)) return 0.05
+            if (!hasBeforeEdgeCountCache) return 1
+            return Math.max(0.45, diffOpacity(getAbsDiff(k)))
+          }
+          if (hoverNodeId) {
+            if (
+                d.source.id === hoverNodeId ||
+                d.target.id === hoverNodeId
+            ) return 1
+            return 0.05
+          }
+          if (hoverEdgeKey) return k === hoverEdgeKey ? 1 : 0.05
+          return Math.max(0.45, linkOpacity(d.value))
+        })
+        .attr("stroke", d => {
+          const k = edgeKey(d)
+          if (hasEdgeHighlight && highlightEdges.has(k)) {
+            return pickHighlightColor(k, linkColor(d.value))
+          }
+          return linkColor(d.value)
         })
   }
 
@@ -958,6 +1393,9 @@ function renderGraph(data) {
 <template>
   <div class="force-root">
     <div ref="tooltipRef" class="tooltip"></div>
+    <div v-if="noVisibleNodes" class="empty-visible">
+      No full-order high-order states in this view.
+    </div>
     <svg ref="svgRef"></svg>
   </div>
 </template>
@@ -966,6 +1404,8 @@ function renderGraph(data) {
 .force-root{
   width:100%;
   height:100%;
+  flex: 1;
+  min-height: 0;
   position:relative;
 }
 
@@ -977,7 +1417,7 @@ svg{
 }
 
 .tooltip {
-  position: absolute;
+  position: fixed;
   pointer-events: none;
   background: rgba(0, 0, 0, 0.75);
   color: #fff;
@@ -989,7 +1429,20 @@ svg{
   transition: opacity 0.15s ease;
   white-space: nowrap;
   text-align: left;
-  z-index: 1000;
+  z-index: 100000;
+}
+
+.empty-visible {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
 }
 svg {
   background: transparent !important;

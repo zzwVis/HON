@@ -1,12 +1,10 @@
 <script setup>
 import GraphGlyph from "@/components/GraphGlyph.vue";
-import DetailedHONode from "./components/DetailedHONode.vue";
-import DetailedVONode from "./components/DetailedVONode.vue";
-import Scatterplot from "./components/Scatterplot.vue";
-import Sequence from "@/components/Sequence.vue";
 import RawSequence from "@/components/RawSequence.vue";
 import BrushPanel from "@/components/BrushPanel.vue";
 import Comparison from "@/components/Comparison.vue";
+import FirstOrderStateInspector from "@/components/FirstOrderStateInspector.vue";
+import GlobalLegend from "@/components/GlobalLegend.vue";
 import { useRegionStore } from "@/store/regionStore.js"
 
 const regionStore = useRegionStore()
@@ -14,28 +12,27 @@ const regionStore = useRegionStore()
 
 <template>
   <div class="container">
-    <!-- 左列 -->
-    <div class="left-column">
-      <div class="cell top-left">
-<!--        <DetailedVONode />-->
-      </div>
-      <div class="cell bottom-left">
-        <DetailedHONode />
-      </div>
-    </div>
+    <div class="workspace-column">
+      <GlobalLegend />
+      <div class="workspace-grid">
+        <div class="grid-cell first-order-view">
+          <RawSequence fixed-mode="graph" />
+        </div>
 
-    <!-- 中列 -->
-    <div class="middle-column">
-      <div class="grid-container">
-        <div class="grid-cell top-left" :class="{ 'container-active': regionStore.activeRegionId === 'global' }">
+        <div class="grid-cell higher-order-view" :class="{ 'container-active': regionStore.activeRegionId === 'global' }">
           <GraphGlyph />
         </div>
-        <div class="grid-cell top-right">
-          <RawSequence />
-<!--          <Sequence />-->
+
+        <div class="grid-cell sequence-view">
+          <RawSequence :modes="['sequence', 'sankey']" initial-mode="sankey" />
         </div>
-        <!-- 合并底部区域 -->
-        <div class="grid-cell bottom-full">
+
+        <div class="grid-cell inspector-view">
+          <FirstOrderStateInspector />
+<!--          <DetailedHONode />-->
+        </div>
+
+        <div class="grid-cell comparison-view">
           <Comparison />
         </div>
       </div>
@@ -67,9 +64,8 @@ const regionStore = useRegionStore()
   background: var(--paper-bg);
 }
 
-/* 三列的通用样式 */
-.left-column,
-.middle-column,
+/* 主工作区 + 右侧面板 */
+.workspace-column,
 .right-column {
   display: flex;
   flex-direction: column;
@@ -77,16 +73,12 @@ const regionStore = useRegionStore()
   gap: 12px;
 }
 
-/* 左列 */
-.left-column {
-  flex: 2.15;
+/* 主工作区 */
+.workspace-column {
+  flex: 12.8;
   min-width: 0;
-}
-
-/* 中列 */
-.middle-column {
-  flex: 11;
-  min-width: 0;
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   background-color: var(--panel-bg);
@@ -112,16 +104,6 @@ const regionStore = useRegionStore()
   overflow: hidden;
 }
 
-.left-column .bottom-left {
-  flex: 1; /* 占满整个空间 */
-  min-height: 0;
-}
-
-/* 如果 top-left 被移除，可以删除这个样式 */
-.left-column .top-left {
-  display: none; /* 或者完全删除这个样式 */
-}
-
 /* 右列布局 - 使用8行布局（2+6） */
 .right-column {
   display: flex;
@@ -134,10 +116,10 @@ const regionStore = useRegionStore()
   min-height: 0;
 }
 
-/* 中列网格容器 - 修改为2x2布局，底部合并为一行 */
-.grid-container {
+.workspace-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 3fr) minmax(520px, 5fr);
+  flex: 1;
+  grid-template-columns: minmax(220px, 1.85fr) minmax(360px, 3.2fr) minmax(460px, 5fr);
   grid-template-rows: minmax(310px, 2fr) minmax(420px, 3fr);
   gap: 9px;
   height: 100%;
@@ -165,19 +147,32 @@ const regionStore = useRegionStore()
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
-/* 合并底部区域 - 新增样式 */
-.grid-cell.bottom-full {
-  grid-column: 1 / 3; /* 跨越第1列到第3列（整行） */
-  grid-row: 2; /* 第二行 */
+.first-order-view {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.higher-order-view {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.sequence-view {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.inspector-view {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.comparison-view {
+  grid-column: 2 / 4;
+  grid-row: 2;
 }
 
 /* 确保内部组件自适应容器大小 */
-.cell > * {
-  width: 100%;
-  height: 100%;
-  box-sizing: border-box;
-}
-
 .grid-cell > * {
   width: 100%;
   height: 100%;
@@ -200,8 +195,7 @@ const regionStore = useRegionStore()
     flex-direction: column;
   }
 
-  .left-column,
-  .middle-column,
+  .workspace-column,
   .right-column {
     width: 100%;
     flex: none;
@@ -209,14 +203,37 @@ const regionStore = useRegionStore()
   }
 
   /* 响应式时恢复普通布局 */
-  .grid-container {
+  .workspace-grid {
     grid-template-columns: 1fr;
-    grid-template-rows: repeat(3, 1fr);
+    grid-template-rows: repeat(5, minmax(280px, 1fr));
   }
 
-  .grid-cell.bottom-full {
+  .first-order-view,
+  .higher-order-view,
+  .sequence-view,
+  .inspector-view,
+  .comparison-view {
     grid-column: 1;
+  }
+
+  .first-order-view {
+    grid-row: 1;
+  }
+
+  .higher-order-view {
+    grid-row: 2;
+  }
+
+  .sequence-view {
     grid-row: 3;
+  }
+
+  .inspector-view {
+    grid-row: 4;
+  }
+
+  .comparison-view {
+    grid-row: 5;
   }
 }
 
