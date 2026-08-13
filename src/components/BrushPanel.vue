@@ -121,14 +121,11 @@ watch(conditionType, () => {
 })
 
 const filteredPresetOptions = computed(() => {
-  const q = conditionSearch.value.trim().toLowerCase()
+  const q = conditionSearch.value.trim()
   if (!q) return presetOptions.value.slice(0, 80)
 
   return presetOptions.value
-    .filter(option =>
-      option.label.toLowerCase().includes(q) ||
-      String(option.value).toLowerCase().includes(q)
-    )
+    .filter(option => matchesCandidateSearch(option, q))
     .slice(0, 120)
 })
 
@@ -213,6 +210,55 @@ function setInteractionMode(mode) {
 
 function cleanToken(token) {
   return String(token ?? "").replace(/[()']/g, "").trim()
+}
+
+function normalizeSearchText(text) {
+  const raw = String(text ?? "").toLowerCase().trim()
+  const spaced = raw
+    .replace(/node\s*(\d+)/g, "node$1")
+    .replace(/(?:→|->|=>|>|,|;|\/|\\|\||\s+)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  return {
+    raw,
+    spaced,
+    compact: spaced.replace(/\s+/g, "")
+  }
+}
+
+function orderedTokenMatch(haystack, query) {
+  const hTokens = haystack.spaced.split(" ").filter(Boolean)
+  const qTokens = query.spaced.split(" ").filter(Boolean)
+  if (!qTokens.length) return true
+
+  let hi = 0
+  for (const qToken of qTokens) {
+    let found = false
+    while (hi < hTokens.length) {
+      if (hTokens[hi].includes(qToken)) {
+        found = true
+        hi += 1
+        break
+      }
+      hi += 1
+    }
+    if (!found) return false
+  }
+  return true
+}
+
+function matchesCandidateSearch(option, queryText) {
+  const query = normalizeSearchText(queryText)
+  if (!query.spaced) return true
+
+  return [option.label, option.value]
+    .map(normalizeSearchText)
+    .some(haystack =>
+      haystack.raw.includes(query.raw.toLowerCase()) ||
+      haystack.spaced.includes(query.spaced) ||
+      haystack.compact.includes(query.compact) ||
+      orderedTokenMatch(haystack, query)
+    )
 }
 
 function isPresetSelected(value) {

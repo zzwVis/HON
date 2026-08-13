@@ -2,6 +2,7 @@ import { defineStore } from "pinia"
 import { ref, computed } from "vue"
 import * as d3 from "d3"
 import { useBrushStore } from "@/store/brushStore"
+import { computeMemorySplits, findMemorySplit, splitTokenKey } from "@/composables/memorySplits"
 
 export const usePayloadStore = defineStore("payload", () => {
 
@@ -280,6 +281,16 @@ export const usePayloadStore = defineStore("payload", () => {
      * filtered payload
      * ====================== */
 
+    const memorySplits = computed(() => computeMemorySplits(payload.value))
+
+    const memorySplitByToken = computed(() => {
+        const map = {}
+        memorySplits.value.forEach(item => {
+            map[item.tokenKey] = item
+        })
+        return map
+    })
+
     const filteredPayload = computed(function filteredPayloadComputed() {
 
         const p = payload.value
@@ -360,6 +371,12 @@ export const usePayloadStore = defineStore("payload", () => {
         originalPayload,
 
         filteredPayload,
+        memorySplits,
+        memorySplitByToken,
+        findMemorySplitForToken(token) {
+            return findMemorySplit(memorySplits.value, token)
+        },
+        splitTokenKey,
 
         colorScale,
         buildGlobalColorScale,

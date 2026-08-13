@@ -3,12 +3,16 @@ import { computed, ref } from "vue"
 import { usePayloadStore } from "@/store/payloadStore.js"
 import { useBrushStore } from "@/store/brushStore.js"
 import { useRegionStore } from "@/store/regionStore.js"
+import { computeMemorySplits } from "@/composables/memorySplits.js"
 
 const payloadStore = usePayloadStore()
 const brushStore = useBrushStore()
 const regionStore = useRegionStore()
 const expandedContexts = ref(new Set())
 const expandedContextGroups = ref(new Set())
+const foContextSortDescending = ref(true)
+const hoMemberSortDescending = ref(true)
+const foNextEventFocus = ref(null)
 
 const selectionRegionId = computed(() => {
   if (payloadStore.selectedHighOrderClass != null) {
@@ -203,6 +207,11 @@ function buildBars(counts, legend) {
       .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
 }
 
+function contextBarForEvent(context, eventName) {
+  if (!context || eventName == null) return null
+  return (context.bars || []).find(bar => sameToken(bar.token, eventName)) || null
+}
+
 function visibleMemberStates(glyph) {
   return Array.isArray(glyph?.full_order_states) ? glyph.full_order_states : (glyph?.unique_states || [])
 }
@@ -265,7 +274,44 @@ const inspector = computed(() => {
       b.occurrences - a.occurrences
   )
 
-  const visibleContexts = contexts.slice(0, 24)
+  const focusedNextEvent = Array.from(summary.nextCounts.keys())
+      .find(token => sameToken(token, foNextEventFocus.value)) || null
+  const contextsForEvent = focusedNextEvent
+      ? contexts.filter(context => contextBarForEvent(context, focusedNextEvent))
+      : contexts
+
+  const hoNodeCounts = new Map()
+  contextsForEvent.forEach(context => {
+    hoNodeCounts.set(context.classId, (hoNodeCounts.get(context.classId) || 0) + 1)
+  })
+  const hoNodeDistribution = Array.from(hoNodeCounts.entries())
+      .map(([classId, count]) => ({
+        classId,
+        label: `HO Node ${classId}`,
+        count,
+        isOther: false
+      }))
+      .sort((a, b) => b.count - a.count || Number(a.classId) - Number(b.classId))
+  const shownHoNodeDistribution = hoNodeDistribution.slice(0, 3)
+  const otherHoNodeCount = hoNodeDistribution.slice(3).reduce((sum, item) => sum + item.count, 0)
+  if (otherHoNodeCount > 0) {
+    shownHoNodeDistribution.push({
+      classId: null,
+      label: "Others",
+      count: otherHoNodeCount,
+      isOther: true
+    })
+  }
+
+  const orderedContexts = foContextSortDescending.value
+      ? contextsForEvent
+      : [...contextsForEvent].sort((a, b) =>
+          a.divergence - b.divergence ||
+          b.sequenceSupport - a.sequenceSupport ||
+          b.occurrences - a.occurrences
+      )
+
+  const visibleContexts = orderedContexts.slice(0, 24)
   const contextGroupMap = new Map()
   visibleContexts.forEach(context => {
     if (!contextGroupMap.has(context.classId)) {
@@ -294,7 +340,15 @@ const inspector = computed(() => {
     ...summary,
     bars: buildBars(summary.nextCounts, payload.legend),
     contexts: visibleContexts,
-    contextGroups
+    contextGroups,
+    focusedNextEvent,
+    focusedNextEventLabel: focusedNextEvent ? displayToken(focusedNextEvent, payload.legend) : null,
+    matchingContextCount: contextsForEvent.length,
+    totalContextCount: contexts.length,
+    hoNodeDistribution: shownHoNodeDistribution,
+    hoNodeDistributionTitle: focusedNextEvent
+        ? `${displayToken(focusedNextEvent, payload.legend)}-related states:`
+        : "All ending states:"
   }
 })
 
@@ -333,6 +387,14 @@ const highOrderInspector = computed(() => {
       b.occurrences - a.occurrences
   )
 
+  if (!hoMemberSortDescending.value) {
+    members.sort((a, b) =>
+        a.divergence - b.divergence ||
+        b.sequenceSupport - a.sequenceSupport ||
+        b.occurrences - a.occurrences
+    )
+  }
+
   const internalConsistency =
       members.length > 0
           ? members.reduce((sum, member) => sum + member.divergence, 0) / members.length
@@ -348,6 +410,8 @@ const highOrderInspector = computed(() => {
     members
   }
 })
+
+const memorySplits = computed(() => computeMemorySplits(activePayload.value))
 
 function formatPct(v) {
   return `${(v * 100).toFixed(2)}%`
@@ -406,7 +470,7 @@ function addSelectedHighOrderToFilter() {
 function addContextToFilter(context) {
   if (!context) return
   ensureFilterForActiveRegion()
-  brushStore.addClass(context.classId)
+  brushStore.addState(context.key)
 }
 
 function addContextGroupToFilter(group) {
@@ -433,16 +497,54 @@ function toggleAppendFocus(bar) {
   payloadStore.setFocusedAppendEvent(null)
 }
 
+function toggleFoContextSort() {
+  foContextSortDescending.value = !foContextSortDescending.value
+}
+
+function toggleHoMemberSort() {
+  hoMemberSortDescending.value = !hoMemberSortDescending.value
+}
+
+function isFoNextEventFocused(bar) {
+  return bar && foNextEventFocus.value != null && sameToken(bar.token, foNextEventFocus.value)
+}
+
+function toggleFoNextEventFocus(bar) {
+  if (!bar) return
+  foNextEventFocus.value = isFoNextEventFocused(bar) ? null : String(bar.token)
+}
+
+function focusedContextEventBar(context) {
+  return contextBarForEvent(context, inspector.value?.focusedNextEvent)
+}
+
+function inspectHoNodeFromSummary(item) {
+  if (!item || item.isOther || item.classId == null) return
+  payloadStore.setHighOrderClass(String(item.classId), selectionRegionId.value || "global")
+}
+
 function clearHighOrderHover() {
   payloadStore.setHoveredHighOrderClasses([])
 }
 
 function setContextHover(classId) {
-  payloadStore.setHoveredHighOrderClasses([])
+  payloadStore.setHoveredHighOrderClasses(classId == null ? [] : [String(classId)])
+}
+
+function hoverMemorySplit(split) {
+  payloadStore.setHoveredHighOrderClasses(split?.classIds || [])
+}
+
+function inspectMemorySplit(split) {
+  if (!split) return
+  payloadStore.setFirstOrderState(String(split.token), selectionRegionId.value || "global")
 }
 
 function setFirstOrderProjectionHover(bar, contexts) {
-  payloadStore.setHoveredHighOrderClasses([])
+  const classIds = (contexts || [])
+      .filter(context => contextBarForEvent(context, bar?.token))
+      .map(context => String(context.classId))
+  payloadStore.setHoveredHighOrderClasses(classIds)
 }
 
 function clearFirstOrderProjectionHover() {
@@ -457,7 +559,52 @@ function clearFirstOrderProjectionHover() {
     </header>
 
     <div v-if="!inspector && !highOrderInspector" class="empty-state">
-      Select a state in the first-order network or a high-order node.
+      <div v-if="!activePayload" class="small-empty">
+        Select a state in the first-order network or a high-order node.
+      </div>
+      <template v-else>
+        <div class="section-label compact-top">Memory splits</div>
+        <div class="state-meta" style="margin-bottom: 8px;">
+          First-order events that end in 2+ high-order nodes. Click to inspect; hover to highlight those nodes.
+        </div>
+        <div v-if="memorySplits.length" class="scroll-block context-block">
+          <div class="context-list">
+            <div
+                v-for="split in memorySplits"
+                :key="split.tokenKey"
+                class="context-row split-row"
+                @mouseenter="hoverMemorySplit(split)"
+                @mouseleave="clearHighOrderHover"
+                @click="inspectMemorySplit(split)"
+            >
+              <div class="context-summary">
+                <div class="context-main">
+                  <div class="context-tokens">
+                    <span
+                        class="token-circle"
+                        :title="split.label"
+                        :style="{ backgroundColor: tokenColor(split.token) }"
+                    ></span>
+                    <span class="split-label">{{ split.label }}</span>
+                  </div>
+                  <div class="context-meta">
+                    {{ split.hoNodeCount }} HO nodes · max KL {{ split.maxPairKl.toFixed(3) }}
+                    · {{ split.occurrences }} occ
+                  </div>
+                  <div v-if="split.contrast.length === 2" class="split-contrast">
+                    <span v-for="side in split.contrast" :key="split.tokenKey + ':' + side.classId">
+                      HO {{ side.classId }} → {{ side.nextLabel }} {{ formatPct(side.nextProb) }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else class="small-empty">
+          No first-order event is split across multiple high-order nodes. Click a state or HO node to inspect.
+        </div>
+      </template>
     </div>
 
     <template v-else-if="inspector">
@@ -485,6 +632,9 @@ function clearFirstOrderProjectionHover() {
             v-for="bar in inspector.bars"
             :key="bar.token"
             class="bar-row"
+            :class="{ 'bar-row-active': isFoNextEventFocused(bar) }"
+            :title="`Show high-order states whose next step includes ${bar.label}`"
+            @click="toggleFoNextEventFocus(bar)"
         >
           <span class="bar-label">
             <span class="bar-label-text">{{ bar.label }}</span>
@@ -499,90 +649,105 @@ function clearFirstOrderProjectionHover() {
       </div>
       <div v-else class="small-empty">No outgoing transition.</div>
 
-      <div class="section-label">High-order contexts ending here</div>
-      <div v-if="inspector.contexts.length" class="scroll-block context-block">
-      <div class="context-group-list">
-        <div
-            v-for="group in inspector.contextGroups"
-            :key="'group:' + group.classId"
-            class="context-group"
+      <div class="section-label section-label-row">
+        <span>High-order states ending here</span>
+        <button
+            v-if="inspector.focusedNextEvent"
+            class="next-event-filter-chip"
+            :title="`Clear next-event focus: ${inspector.focusedNextEventLabel}`"
+            @click="foNextEventFocus = null"
         >
-          <div class="context-group-header">
+          Next = {{ inspector.focusedNextEventLabel }} · {{ inspector.matchingContextCount }}/{{ inspector.totalContextCount }}
+        </button>
+        <button
+            class="sort-toggle-button"
+            :title="foContextSortDescending ? 'Sort KL from low to high' : 'Sort KL from high to low'"
+            @click="toggleFoContextSort"
+        >
+          KL {{ foContextSortDescending ? '↓' : '↑' }}
+        </button>
+      </div>
+      <div
+          v-if="inspector.hoNodeDistribution.length"
+          class="ho-node-summary"
+      >
+        <span class="ho-node-summary-title">{{ inspector.hoNodeDistributionTitle }}</span>
+        <button
+            v-for="item in inspector.hoNodeDistribution"
+            :key="item.label"
+            class="ho-node-summary-chip"
+            :class="{ disabled: item.isOther }"
+            :title="item.isOther ? 'Remaining HO nodes' : `Inspect ${item.label}`"
+            @click="inspectHoNodeFromSummary(item)"
+        >
+          {{ item.label }}: {{ item.count }} {{ item.count === 1 ? 'state' : 'states' }}
+        </button>
+      </div>
+      <div v-if="inspector.contexts.length" class="scroll-block context-block">
+      <div class="context-list state-first-context-list">
+        <div
+            v-for="context in inspector.contexts"
+            :key="context.classId + ':' + context.key"
+            class="context-row state-first-context-row"
+            @mouseenter="setContextHover(context.classId)"
+            @mouseleave="clearHighOrderHover"
+        >
+          <div class="context-summary">
             <button
-                class="expand-button group-expand-button"
-                :class="{ expanded: isContextGroupExpanded(group.classId) }"
-                :title="isContextGroupExpanded(group.classId) ? 'Collapse' : 'Expand'"
-                @click.stop="toggleContextGroupExpanded(group.classId)"
+                class="expand-button"
+                :class="{ expanded: isContextExpanded(context.key) }"
+                :title="isContextExpanded(context.key) ? 'Collapse' : 'Expand'"
+                @click="toggleContextExpanded(context.key)"
             >
               <span class="triangle-icon"></span>
             </button>
-            <div class="context-group-main">
-              <div class="context-group-title">HO Node {{ group.classId }} · {{ group.contexts.length }} states</div>
+            <div class="context-main">
+              <div class="context-tokens state-context-tokens">
+                <template v-for="(token, index) in context.tokenItems" :key="context.key + ':' + index">
+                  <span class="token-circle" :title="token.label" :style="{ backgroundColor: token.color }"></span>
+                  <span v-if="index < context.tokenItems.length - 1" class="token-arrow">→</span>
+                </template>
+                <span class="ho-node-tag" :title="`This state belongs to HO Node ${context.classId}`">
+                  HO Node {{ context.classId }}
+                </span>
+              </div>
               <div
-                  class="context-group-meta"
-                  title="Maximum KL divergence between a high-order context ending here and the selected first-order state's next-step behavior."
+                  class="context-meta"
+                  title="KL divergence from the selected first-order state's next-step behavior."
               >
-                max KL vs FO {{ group.maxDivergence.toFixed(3) }}
+                {{ context.sequenceSupport }} seqs · KL vs selected FO {{ context.divergence.toFixed(3) }}
+                <template v-if="inspector.focusedNextEvent">
+                  · {{ inspector.focusedNextEventLabel }} {{ formatPct(focusedContextEventBar(context)?.prob || 0) }}
+                </template>
               </div>
             </div>
-            <button class="mini-button" @click.stop="addContextGroupToFilter(group)">Filter</button>
+            <button class="mini-button" @click="addContextToFilter(context)">Filter</button>
           </div>
-          <div v-if="isContextGroupExpanded(group.classId)" class="context-list grouped-context-list">
-            <div
-                v-for="context in group.contexts"
-                :key="context.classId + ':' + context.key"
-                class="context-row"
-            >
-              <div class="context-summary">
-                <button
-                    class="expand-button"
-                    :class="{ expanded: isContextExpanded(context.key) }"
-                    :title="isContextExpanded(context.key) ? 'Collapse' : 'Expand'"
-                    @click="toggleContextExpanded(context.key)"
-                >
-                  <span class="triangle-icon"></span>
-                </button>
-                <div class="context-main">
-                  <div class="context-tokens">
-                    <template v-for="(token, index) in context.tokenItems" :key="context.key + ':' + index">
-                      <span class="token-circle" :title="token.label" :style="{ backgroundColor: token.color }"></span>
-                      <span v-if="index < context.tokenItems.length - 1" class="token-arrow">→</span>
-                    </template>
-                  </div>
-                  <div
-                      class="context-meta"
-                      title="KL divergence from the selected first-order state's next-step behavior."
-                  >
-                    {{ context.sequenceSupport }} seqs · KL vs FO {{ context.divergence.toFixed(3) }}
-                  </div>
+          <div v-if="isContextExpanded(context.key)" class="context-detail">
+            <div v-if="context.bars.length" class="context-bar-list">
+              <div
+                  v-for="bar in context.bars"
+                  :key="context.key + ':' + bar.token"
+                  class="bar-row context-bar-row"
+              >
+                <span class="bar-label">
+                  <span class="bar-label-text" :title="bar.label">{{ compactLabel(bar.label) }}</span>
+                  <span class="next-token-dot" :title="bar.label" :style="{ backgroundColor: tokenColor(bar.token) }"></span>
+                </span>
+                <div class="bar-track">
+                  <div class="bar-fill context-bar-fill" :style="{ width: barWidth(bar.prob) }"></div>
                 </div>
-                <button class="mini-button" @click="addContextToFilter(context)">Filter</button>
-              </div>
-              <div v-if="isContextExpanded(context.key)" class="context-detail">
-                <div v-if="context.bars.length" class="context-bar-list">
-                  <div
-                      v-for="bar in context.bars"
-                      :key="context.key + ':' + bar.token"
-                      class="bar-row context-bar-row"
-                  >
-                    <span class="bar-label">
-                      <span class="bar-label-text" :title="bar.label">{{ compactLabel(bar.label) }}</span>
-                      <span class="next-token-dot" :title="bar.label" :style="{ backgroundColor: tokenColor(bar.token) }"></span>
-                    </span>
-                    <div class="bar-track">
-                      <div class="bar-fill context-bar-fill" :style="{ width: barWidth(bar.prob) }"></div>
-                    </div>
-                    <span class="bar-value">{{ formatPct(bar.prob) }}</span>
-                  </div>
-                </div>
-                <div v-else class="small-empty">No outgoing transition.</div>
+                <span class="bar-value">{{ formatPct(bar.prob) }}</span>
               </div>
             </div>
+            <div v-else class="small-empty">No outgoing transition.</div>
           </div>
         </div>
       </div>
       </div>
-      <div v-else class="small-empty">No high-order context ends with this state.</div>
+      <div v-else class="small-empty">
+        {{ inspector.focusedNextEvent ? 'No high-order state has this next step.' : 'No high-order state ends with this state.' }}
+      </div>
     </template>
 
     <template v-else-if="highOrderInspector">
@@ -630,7 +795,16 @@ function clearFirstOrderProjectionHover() {
       </div>
       <div v-else class="small-empty">No outgoing transition.</div>
 
-      <div class="section-label">{{ highOrderInspector.members.length }} Member States</div>
+      <div class="section-label section-label-row">
+        <span>{{ highOrderInspector.members.length }} Member States</span>
+        <button
+            class="sort-toggle-button"
+            :title="hoMemberSortDescending ? 'Sort KL from low to high' : 'Sort KL from high to low'"
+            @click="toggleHoMemberSort"
+        >
+          KL {{ hoMemberSortDescending ? '↓' : '↑' }}
+        </button>
+      </div>
       <div v-if="highOrderInspector.members.length" class="scroll-block member-block">
       <div class="context-list">
         <div
@@ -721,6 +895,42 @@ function clearFirstOrderProjectionHover() {
   line-height: 1.45;
 }
 
+.empty-state {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.split-row {
+  padding-left: 7px;
+  cursor: pointer;
+}
+
+.split-row:hover {
+  border-color: rgba(59, 130, 246, 0.45);
+  background: var(--accent-soft);
+}
+
+.split-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #111827;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.split-contrast {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
 .state-heading {
   display: flex;
   justify-content: space-between;
@@ -763,6 +973,87 @@ function clearFirstOrderProjectionHover() {
   color: #111827;
 }
 
+.section-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sort-toggle-button {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.sort-toggle-button:hover {
+  color: var(--accent);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.next-event-filter-chip {
+  min-width: 0;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ho-node-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: -1px 0 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.ho-node-summary-title {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: #334155;
+}
+
+.ho-node-summary-chip {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.ho-node-summary-chip:not(.disabled):hover {
+  color: var(--accent);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.ho-node-summary-chip.disabled {
+  cursor: default;
+  background: var(--panel-soft);
+}
+
 .compact-top {
   margin-top: 1px;
 }
@@ -780,6 +1071,13 @@ function clearFirstOrderProjectionHover() {
   gap: 6px;
   font-size: 11px;
   cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 2px;
+  margin: -1px -2px;
+}
+
+.bar-row-active {
+  background: var(--accent-soft);
 }
 
 .bar-label {
@@ -864,7 +1162,7 @@ function clearFirstOrderProjectionHover() {
 
 .context-group-title {
   font-weight: 700;
-  color: #111827;
+  color: #334155;
 }
 
 .context-group-meta {
@@ -878,6 +1176,14 @@ function clearFirstOrderProjectionHover() {
 
 .grouped-context-list {
   gap: 4px;
+}
+
+.state-first-context-list {
+  gap: 6px;
+}
+
+.state-first-context-row {
+  background: #fff;
 }
 
 .group-expand-button {
@@ -911,6 +1217,23 @@ function clearFirstOrderProjectionHover() {
   gap: 3px;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.state-context-tokens {
+  gap: 4px;
+}
+
+.ho-node-tag {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.25;
 }
 
 .token-circle {

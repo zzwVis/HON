@@ -16,6 +16,7 @@ import { useRegionStore } from "@/store/regionStore.js"
 import { useBrushStore } from "@/store/brushStore.js"
 import Graph from "graphology"
 import forceAtlas2 from "graphology-layout-forceatlas2"
+import { splitTokenKey } from "@/composables/memorySplits.js"
 
 const props = defineProps({
   fixedMode: {
@@ -231,9 +232,17 @@ watch(
 )
 
 function refreshSelectedStateRing() {
+  const selected = payloadStore.selectedFirstOrderState
   d3.select(svgRef.value)
-      .selectAll(".selected-state-ring")
-      .attr("opacity", 0)
+      .selectAll("g.node")
+      .each(function(d) {
+        const isSelected = selected != null && splitTokenKey(d.class) === splitTokenKey(selected)
+        d3.select(this).select(".selected-state-ring").attr("opacity", isSelected ? 1 : 0)
+      })
+}
+
+function getMemorySplitForNode(d) {
+  return payloadStore.memorySplitByToken?.[splitTokenKey(d?.class)] || null
 }
 
 function entropyFromTransitionLinks(links) {
@@ -909,11 +918,45 @@ function renderFa2Graph(data) {
 
   nodeSel.append("circle")
       .attr("class", "selected-state-ring")
-      .attr("r", d => radiusScale(d.seqSupport) + 4)
+      .attr("r", d => radiusScale(d.seqSupport) + 6)
       .attr("fill", "none")
       .attr("stroke", "#1f2937")
       .attr("stroke-width", 1.4)
       .attr("opacity", 0)
+      .attr("pointer-events", "none")
+
+  nodeSel.append("circle")
+      .attr("class", "split-mark")
+      .attr("r", d => radiusScale(d.seqSupport) + 3.5)
+      .attr("fill", "none")
+      .attr("stroke", "#2563eb")
+      .attr("stroke-width", 1.15)
+      .attr("stroke-dasharray", "2.4 1.8")
+      .attr("opacity", d => getMemorySplitForNode(d) ? 1 : 0)
+      .attr("pointer-events", "none")
+
+  const splitBadge = nodeSel.append("g")
+      .attr("class", "split-badge")
+      .attr("pointer-events", "none")
+      .attr("transform", d => {
+        const r = radiusScale(d.seqSupport)
+        return `translate(${r * 0.75},${-r * 0.75})`
+      })
+      .attr("opacity", d => getMemorySplitForNode(d) ? 1 : 0)
+
+  splitBadge.append("circle")
+      .attr("r", 6)
+      .attr("fill", "#2563eb")
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 0.8)
+
+  splitBadge.append("text")
+      .attr("text-anchor", "middle")
+      .attr("dy", "0.35em")
+      .attr("fill", "#fff")
+      .attr("font-size", 8)
+      .attr("font-weight", 700)
+      .text(d => getMemorySplitForNode(d)?.hoNodeCount || "")
 
   function refresh() {
     linkSel.attr("d", d => {
@@ -951,17 +994,22 @@ function renderFa2Graph(data) {
   nodeSel
       .on("mouseenter", (event, d) => {
         d3.select(event.currentTarget).style("cursor", "pointer")
+        const split = getMemorySplitForNode(d)
+        const splitLine = split
+            ? `<b>memory split:</b> ${split.hoNodeCount} HO nodes · max KL ${split.maxPairKl.toFixed(3)}<br/>`
+            : ""
         showTooltip(
-            `<b>state:</b> ${getDisplayToken(d.class, data.legend)}<br/><b>support:</b> ${d.seqSupport} seqs<br/><b>occurrences:</b> ${d.occurrences}<br/><b>out-flow:</b> ${d.outFlow}<br/><b>entropy:</b> ${d.entropy.toFixed(3)}<br/>`,
+            `<b>state:</b> ${getDisplayToken(d.class, data.legend)}<br/><b>support:</b> ${d.seqSupport} seqs<br/><b>occurrences:</b> ${d.occurrences}<br/><b>out-flow:</b> ${d.outFlow}<br/><b>entropy:</b> ${d.entropy.toFixed(3)}<br/>${splitLine}`,
             event
         )
-        // nodeSel.attr("opacity", n => (n.id === d.id ? 1 : 0.25))
         linkSel.attr("opacity", l => (l.source.id === d.id || l.target.id === d.id) ? 1 : 0.01)
+        if (split) payloadStore.setHoveredHighOrderClasses(split.classIds)
       })
       .on("mouseleave", () => {
         hideTooltip()
         nodeSel.attr("opacity", 1)
         linkSel.attr("opacity", l => linkOpacity(l.value))
+        payloadStore.setHoveredHighOrderClasses([])
       })
       .on("click", (event, d) => {
         event.stopPropagation()
@@ -975,6 +1023,7 @@ function renderFa2Graph(data) {
       })
 
   refresh()
+  refreshSelectedStateRing()
 }
 
 /* ===============================

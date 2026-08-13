@@ -34,8 +34,8 @@ function swatchColor(token) {
         :key="token"
         class="legend-item"
     >
-      <span class="legend-label">{{ token }}</span>
       <span class="swatch" :style="{ backgroundColor: swatchColor(token) }"></span>
+      <span class="legend-label">{{ token }}</span>
     </div>
   </div>
 </template>
@@ -45,7 +45,7 @@ function swatchColor(token) {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 12px;
+  gap: 8px 18px;
   padding: 6px 8px 8px;
   border-bottom: 1px solid var(--panel-border);
   background: linear-gradient(180deg, #fbfcfe, #f2f5f8);
@@ -56,7 +56,7 @@ function swatchColor(token) {
 .legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .legend-label {

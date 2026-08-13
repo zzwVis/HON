@@ -577,23 +577,15 @@ function renderSankey(data) {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 10px 14px;
+  gap: 10px 20px;
 }
 
 .legend-item {
   display: inline-flex;
   flex-direction: row;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   margin: 0;
-}
-
-.legend-item > div:last-child {
-  order: 1;
-}
-
-.legend-item > .swatch {
-  order: 2;
 }
 
 .swatch {
